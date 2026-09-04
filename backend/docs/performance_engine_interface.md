@@ -109,7 +109,7 @@ percentiles itself, only read what k6 already computed:
 
 Note k6's `--summary-export` layout has varied slightly across versions
 (stats directly on the metric object vs. nested under a `values` key) —
-handle both defensively, as `app/services/reference_k6_engine.py` does.
+handle both defensively (`app/services/k6_engine/metrics_parser.py` does).
 
 **Raw NDJSON output (`k6 run --out json=raw.ndjson`) is NOT required for
 MVP.** It is optional future/diagnostic tooling only. This is a deliberate
@@ -143,19 +143,12 @@ does not need to re-validate VU counts or durations itself.
 
 ## Wiring
 
-`app/services/engine_provider.py` is the single place that decides which
-`PerformanceEngine` implementation the API uses. Point it at your real
-engine when it's ready; nothing in `app/api` or `run_service.py` needs to
-change. When you do:
-
-1. Swap the implementation in `engine_provider.py`.
-2. Run the full backend test suite.
-3. Run the real golden path against your engine.
-4. Delete `app/services/reference_k6_engine.py` — it is a **temporary**
-   Phase-1 placeholder (bare GET requests, no payload generation, no
-   auth), not a second production-selectable engine architecture. Once
-   your engine is wired in, remove it and any documentation that still
-   points at it.
+**Status: complete.** `app/services/engine_provider.py` points at
+`RealK6PerformanceEngine` (`app/services/k6_engine/engine.py`).
+`reference_k6_engine.py` has been deleted — it was a temporary Phase-1
+placeholder, never a second production-selectable engine architecture.
+Full backend test suite (77 tests) and the real k6 integration suite
+against the canonical demo API both pass against the real engine.
 
 ## Target environments
 

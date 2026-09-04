@@ -1,12 +1,12 @@
 """Single wiring point for which PerformanceEngine implementation the API
-uses. Swap this when Developer 2's real engine is ready -- nothing else in
-app/api or app/services/run_service.py needs to change.
+uses. Nothing else in app/api or app/services/run_service.py needs to
+change when the implementation here changes.
 """
 
+from app.services.k6_engine.engine import RealK6PerformanceEngine
 from app.services.performance_engine import PerformanceEngine
-from app.services.reference_k6_engine import ReferenceK6Engine
 
-_engine: PerformanceEngine = ReferenceK6Engine()
+_engine: PerformanceEngine = RealK6PerformanceEngine()
 
 
 def get_performance_engine() -> PerformanceEngine:
