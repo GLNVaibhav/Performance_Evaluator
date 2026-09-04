@@ -1,0 +1,15 @@
+{
+  "objective_type": "boundary_search",
+  "test_type": "stress",
+  "target_vus": 50,
+  "ramp_duration": "5s",
+  "hold_duration": "10s",
+  "thresholds": {
+    "p95_latency_ms": 2000,
+    "error_rate": 0.01
+  },
+  "selected_endpoints": ["/checkout"],
+  "assumptions": [
+    "demo-mode accelerated duration; single experiment, no adaptive loop yet"
+  ]
+}
