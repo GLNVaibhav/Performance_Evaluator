@@ -7,6 +7,7 @@ from app.schemas.run import RunCreateRequest, RunCreateResponse, RunStatusRespon
 from app.schemas.test_result import TestResult
 from app.services import run_service
 from app.services.engine_provider import get_performance_engine
+from app.services.workload_limits import WorkloadLimitExceededError
 from app.storage import repository
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -22,6 +23,8 @@ def create_run(
         run_record = run_service.create_run(db, request)
     except run_service.PlanNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except WorkloadLimitExceededError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
     background_tasks.add_task(run_service.execute_run, run_record.id, get_performance_engine())
     return RunCreateResponse(run_id=run_record.id, status=RunState(run_record.state))

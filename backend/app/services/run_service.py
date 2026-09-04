@@ -13,6 +13,7 @@ from app.schemas.enums import RunState
 from app.schemas.run import RunCreateRequest
 from app.schemas.test_plan import TargetConfig, TestPlan
 from app.services.performance_engine import PerformanceEngine
+from app.services.workload_limits import validate_workload_limits
 from app.storage import repository
 from app.storage.db import SessionLocal
 from app.storage.models import TestRunRecord
@@ -41,6 +42,10 @@ def create_run(db: Session, request: RunCreateRequest) -> TestRunRecord:
     creates a QUEUED TestRun. Does not execute anything."""
 
     plan: TestPlan = request.plan if request.plan is not None else _load_hardcoded_plan(request.plan_id)
+
+    # Authoritative workload safety gate. Runs for every plan source
+    # (inline or hardcoded) before anything is persisted or reaches k6.
+    validate_workload_limits(plan)
 
     plan_record = repository.save_plan(db, plan)
     artifact_dir = ARTIFACTS_DIR / "pending"  # replaced below once run id exists
