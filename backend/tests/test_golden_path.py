@@ -7,6 +7,8 @@ not exist yet -- but the k6 execution itself is real, not mocked.
 
 import time
 
+from app.core.config import ARTIFACTS_DIR
+
 
 def test_golden_path_baseline_checkout(client, stub_target_url):
     create_resp = client.post(
@@ -34,6 +36,8 @@ def test_golden_path_baseline_checkout(client, stub_target_url):
     result_resp = client.get(f"/api/v1/runs/{run_id}/result")
     assert result_resp.status_code == 200, result_resp.text
     result = result_resp.json()
+
+    assert (ARTIFACTS_DIR / run_id / "results.json").exists()
 
     assert result["run_id"] == run_id
     assert result["threshold_status"] in ("PASS", "FAIL")

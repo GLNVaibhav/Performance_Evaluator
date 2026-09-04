@@ -138,7 +138,7 @@ class ReferenceK6Engine:
     ) -> EngineExecutionOutcome:
         artifact_directory.mkdir(parents=True, exist_ok=True)
         script_path = artifact_directory / "script.js"
-        summary_path = artifact_directory / "summary.json"
+        summary_path = artifact_directory / "results.json"
         stdout_path = artifact_directory / "stdout.log"
         stderr_path = artifact_directory / "stderr.log"
 
