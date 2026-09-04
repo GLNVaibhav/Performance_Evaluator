@@ -1,0 +1,14 @@
+{
+  "objective_type": "fixed_load",
+  "test_type": "baseline",
+  "target_vus": 20,
+  "duration": "10s",
+  "thresholds": {
+    "p95_latency_ms": 2000,
+    "error_rate": 0.01
+  },
+  "selected_endpoints": ["/products"],
+  "assumptions": [
+    "demo-mode accelerated duration (10s); not a standard-mode-equivalent result"
+  ]
+}
