@@ -1,6 +1,6 @@
 from fastapi import APIRouter, status
 
-from app.models import DemoMode, ErrorResponse, HealthResponse, ModeRequest, ModeResponse
+from app.models import HealthResponse, ModeRequest, ModeResponse
 from app.state import get_mode, set_mode
 
 router = APIRouter(tags=["demo"])
