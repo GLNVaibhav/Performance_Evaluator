@@ -14,12 +14,20 @@ _tmp_dir = Path(tempfile.mkdtemp(prefix="perfeval_test_"))
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{(_tmp_dir / 'test.db').resolve()}")
 os.environ.setdefault("ARTIFACTS_DIR", str((_tmp_dir / "artifacts").resolve()))
 os.environ.setdefault("K6_EXECUTION_TIMEOUT_S", "60")
+os.environ.setdefault("MAX_VUS", "2000")
+os.environ.setdefault("MAX_DURATION_S", "90")
 
 import uvicorn  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app as backend_app  # noqa: E402
+from app.storage.db import SessionLocal, init_db  # noqa: E402
 from tests.stub_target.app import app as stub_app  # noqa: E402
+
+# Service/repository-level tests talk to the DB directly (no HTTP client),
+# so the schema must exist before they run regardless of collection order --
+# don't rely on the `client` fixture's lifespan startup for that.
+init_db()
 
 
 def _free_port() -> int:
@@ -62,3 +70,18 @@ def stub_target_url():
 def client():
     with TestClient(backend_app) as c:
         yield c
+
+
+@pytest.fixture()
+def db_session():
+    """Direct DB session for service/repository-level tests that don't go
+    through the HTTP API (e.g. failure-semantics tests using a fake
+    engine). Independent connection to the same SQLite file the app uses,
+    same as run_service's background-task session is independent of the
+    request session in production."""
+
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
