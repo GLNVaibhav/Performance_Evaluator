@@ -71,7 +71,13 @@ class RealK6PerformanceEngine:
         )
         duration_s = time.monotonic() - wall_start
 
-        if not outcome.results_exists:
+        # BLOCKER 2 fix: exit_code != 0 is an execution failure regardless
+        # of whether results.json exists. A present results.json does not
+        # override a failed process -- see performance_engine_interface.md
+        # and the frozen order of authority in the remediation brief:
+        # timeout / non-zero exit / missing results / malformed results
+        # ALL precede "parse metrics and evaluate thresholds".
+        if outcome.exit_code != 0 or not outcome.results_exists:
             return EngineExecutionOutcome(
                 exit_code=outcome.exit_code,
                 summary_exists=False,
@@ -79,7 +85,8 @@ class RealK6PerformanceEngine:
                 stderr_log_path=str(outcome.stderr_path),
                 started_at=outcome.started_at,
                 finished_at=outcome.finished_at,
-                error_message=outcome.error_message,
+                error_message=outcome.error_message
+                or f"k6 exited with non-zero status {outcome.exit_code}",
             )
 
         try:
