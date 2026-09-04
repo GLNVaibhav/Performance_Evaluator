@@ -1,26 +1,38 @@
-"""BLOCKER 1 regression tests (Dev-3 gate review): dynamic values reaching
-the generated k6 script (target.base_url, OpenAPI-derived resolved paths)
-must be encoded as safe JS string literals and must never be able to alter
-generated JavaScript syntax or semantics.
+"""BLOCKER 1 regression tests (Dev-3 gate review, second pass).
 
-Threat model: `target.base_url` comes from the run request; resolved
-paths come from the TARGET's own /openapi.json, which is externally
-fetched and therefore not trusted content, even though it's not
-attacker-input in the traditional sense -- a malicious or buggy target
-service can return arbitrary path strings.
+Principle: the security invariant is that externally-derived strings must
+be represented as JS DATA (string literals), never as JS SYNTAX. A
+literal backtick appearing INSIDE a json.dumps-produced double-quoted
+string is harmless data -- testing "no backtick anywhere in the script"
+is the wrong invariant, both over- and under-inclusive (flags harmless
+payload content; says nothing about whether a value could actually
+escape its own encoding). These tests instead verify, directly:
 
-Two layers of proof, per the remediation brief:
-  1. Structural, dependency-free assertions that always run in CI --
-     prove the payload is only ever present inside a json.dumps()-encoded
-     literal, and that NO backtick template literals exist anywhere in
-     the output (backtick/`${...}` are inert outside a template literal,
-     so their complete absence is itself the strongest structural proof).
-  2. An optional Node-based behavioral test (skipped if Node isn't
-     available) that actually evaluates the extracted BASE_URL/URL
-     construction lines and proves no injected code executes and the
-     reconstructed URL exactly matches the original input.
+  1. target.base_url is emitted as a json.dumps-equivalent JS string
+     literal (the BASE_URL declaration's RHS is EXACTLY that literal,
+     nothing concatenated around it).
+  2. resolved OpenAPI paths are emitted the same way (via _js_url_expr).
+  3. `${...}` in a payload remains literal text and can never trigger
+     template-literal interpolation -- proven by executing the real
+     generated code and confirming the runtime value is unchanged,
+     since interpolation succeeding would corrupt it.
+  4. quotes/backslashes/newlines round-trip as data -- proven by reading
+     the value back out of a REAL running JS engine, not just comparing
+     Python strings.
+  5. a malicious payload fragment never becomes an additional executable
+     statement -- proven by executing and checking for the absence of
+     the side effect the payload attempts (globalThis pollution).
+  6. the full rendered script remains syntactically valid JS.
+
+Properties 1-2 are static/structural (always run). Properties 3-5 are
+proven by real Node execution of the exact generated code (skipped
+gracefully if Node is unavailable, never required for CI -- a robust
+unit-level substitute isn't possible for these three specifically,
+because "can this text execute" is an execution question). Property 6
+also uses Node's syntax checker.
 """
 import json
+import re
 import shutil
 import subprocess
 
@@ -32,8 +44,6 @@ from app.services.k6_engine.script_renderer import _js_url_expr, render_script
 
 _THRESHOLDS = Thresholds(p95_latency_ms=2000, error_rate=0.01)
 
-# Every character class called out in the remediation brief, plus the
-# harmless injection probe it names explicitly.
 _INJECTION_PAYLOADS = [
     ("single_quote", "http://evil.example'; globalThis.injected=true; //"),
     ("double_quote", 'http://evil.example"; globalThis.injected=true; //'),
@@ -43,111 +53,101 @@ _INJECTION_PAYLOADS = [
     ("template_expr", "http://evil.example${globalThis.injected=true}"),
 ]
 
+_node_required = pytest.mark.skipif(
+    shutil.which("node") is None, reason="Node not available for behavioral verification"
+)
 
-def _spec_with_malicious_path(payload: str):
-    # The OpenAPI 'paths' key becomes the endpoint's path template
-    # verbatim (see openapi_loader.normalize) -- this is exactly how a
-    # malicious/buggy target's own openapi.json would surface an
-    # injection attempt through resolved_path.
-    return normalize({"paths": {payload: {"get": {}}}})
+_BASE_URL_LINE_RE = re.compile(r"^const BASE_URL = (.+);$", re.MULTILINE)
+
+
+def _extract_base_url_literal(script: str) -> str:
+    match = _BASE_URL_LINE_RE.search(script)
+    assert match, "no 'const BASE_URL = ...;' declaration found in rendered script"
+    return match.group(1)
+
+
+def _minimal_plan(*endpoints: str) -> FixedLoadPlan:
+    return FixedLoadPlan(
+        test_type="baseline",
+        thresholds=_THRESHOLDS,
+        selected_endpoints=list(endpoints),
+        target_vus=10,
+        duration="10s",
+    )
+
+
+# --- Property 1: base_url is EXACTLY a json.dumps-equivalent literal -------
 
 
 @pytest.mark.parametrize("name,payload", _INJECTION_PAYLOADS)
-def test_base_url_injection_payloads_are_structurally_neutralized(name, payload):
+def test_base_url_is_emitted_as_json_equivalent_string_literal(name, payload):
     spec = normalize({"paths": {"/products": {"get": {}}}})
-    plan = FixedLoadPlan(
-        test_type="baseline",
-        thresholds=_THRESHOLDS,
-        selected_endpoints=["/products"],
-        target_vus=10,
-        duration="10s",
+    script = render_script(_minimal_plan("/products"), TargetConfig(base_url=payload), spec)
+
+    literal = _extract_base_url_literal(script)
+    # The RHS must be EXACTLY the json.dumps encoding -- proves the value
+    # is a single, whole string literal, not a value concatenated with or
+    # embedded inside other expression fragments.
+    assert literal == json.dumps(payload), (
+        f"[{name}] BASE_URL RHS is not a bare json.dumps-equivalent literal: {literal!r}"
     )
-    target = TargetConfig(base_url=payload)
+    assert json.loads(literal) == payload
 
-    script = render_script(plan, target, spec)
 
-    # 1. No backtick template literals in the CODE STRUCTURE. A payload
-    #    may legitimately *contain* a literal backtick character as data --
-    #    that's harmless once safely bounded inside a json.dumps() double-
-    #    quoted string (backtick has no special meaning there). What must
-    #    never happen is the surrounding code using a backtick to OPEN a
-    #    template literal. So: strip out the one safely-encoded occurrence
-    #    of the payload, then assert no backtick remains in what's left.
-    encoded = json.dumps(payload)
-    code_without_payload_literal = script.replace(encoded, "")
-    assert "`" not in code_without_payload_literal, (
-        f"[{name}] backtick found OUTSIDE the encoded literal -- "
-        "template literal syntax reintroduced into code structure"
-    )
-
-    # 2. The exact json.dumps() encoding of the payload appears verbatim --
-    #    proves it went through the safe-encoding path, not string glued.
-    assert encoded in script, f"[{name}] expected json.dumps-encoded literal not found in script"
-
-    # 3. The payload is faithfully represented once decoded back out of
-    #    the script's own JSON-literal encoding (round-trip fidelity).
-    assert json.loads(encoded) == payload
-
-    # 4. The dangerous substring never appears as RAW, un-quoted source
-    #    outside of the one safe encoded occurrence. Since a single-line
-    #    Python string containing '\n' becomes an escaped '\\n' inside
-    #    json.dumps output, a raw newline character can only appear in
-    #    the rendered script if it leaked in unescaped -- assert it did not.
-    if "\n" in payload:
-        assert "\n" not in encoded  # json.dumps must have escaped it
-    # 5. The script must remain a single well-formed const assignment for
-    #    BASE_URL -- no stray semicolon breaking out of the statement.
-    assert script.count("const BASE_URL = ") == 1
+# --- Property 2: resolved paths are EXACTLY a json.dumps-equivalent literal
 
 
 @pytest.mark.parametrize("name,payload", _INJECTION_PAYLOADS)
-def test_openapi_derived_path_injection_payloads_are_structurally_neutralized(name, payload):
-    spec = _spec_with_malicious_path(payload)
-    plan = FixedLoadPlan(
-        test_type="baseline",
-        thresholds=_THRESHOLDS,
-        selected_endpoints=[payload],
-        target_vus=10,
-        duration="10s",
-    )
-    target = TargetConfig(base_url="http://127.0.0.1:8080")
-
-    script = render_script(plan, target, spec)
-
-    assert "`" not in script.replace(json.dumps(payload), ""), (
-        f"[{name}] backtick found OUTSIDE the encoded literal for malicious path"
-    )
-    encoded = json.dumps(payload)
-    assert encoded in script, f"[{name}] expected json.dumps-encoded path literal not found"
-    assert json.loads(encoded) == payload
+def test_resolved_path_is_emitted_as_json_equivalent_string_literal(name, payload):
+    expr = _js_url_expr(payload)
+    prefix = "BASE_URL + "
+    assert expr.startswith(prefix), f"[{name}] unexpected url expression shape: {expr!r}"
+    literal = expr[len(prefix):]
+    assert literal == json.dumps(payload), f"[{name}] path literal is not a bare json.dumps encoding: {literal!r}"
+    assert json.loads(literal) == payload
 
 
 def test_js_url_expr_never_uses_template_literal_syntax():
-    expr = _js_url_expr("/products")
-    assert "`" not in expr
-    assert expr == 'BASE_URL + "/products"'
+    assert _js_url_expr("/products") == 'BASE_URL + "/products"'
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node not available for behavioral verification")
 @pytest.mark.parametrize("name,payload", _INJECTION_PAYLOADS)
-def test_node_actually_evaluates_safely_no_global_pollution(name, payload):
-    """Extract just the BASE_URL declaration + one URL-construction
-    expression (both plain JS, no k6-specific imports needed) and run
-    them under real Node. Proves, by actual execution rather than static
-    inspection, that the injection payload never becomes executable code:
-    globalThis.injected must remain unset, and the reconstructed URL must
-    exactly equal base_url + path with no alteration.
+def test_malicious_path_also_resolves_to_a_bare_literal_in_full_render(name, payload):
+    """Same property 2 check, but through the full render_script path
+    (OpenAPI paths dict -> endpoint_resolver -> script_renderer), not
+    just the _js_url_expr unit -- proves the encoding survives the whole
+    pipeline, not just the helper in isolation."""
+    spec = normalize({"paths": {payload: {"get": {}}}})
+    script = render_script(_minimal_plan(payload), TargetConfig(base_url="http://127.0.0.1:8080"), spec)
+    expected = f"BASE_URL + {json.dumps(payload)}"
+    assert expected in script, f"[{name}] expected exact url expression not found in rendered script"
+
+
+# --- Properties 3-5: proven by real execution, not static inspection ------
+
+
+@_node_required
+@pytest.mark.parametrize("name,payload", _INJECTION_PAYLOADS)
+def test_dynamic_value_executes_as_inert_data_with_no_side_effects(name, payload):
+    """Executes the ACTUAL generated BASE_URL declaration and the ACTUAL
+    generated URL-construction expression (both extracted verbatim from
+    a real render_script() call, not hand-written) under real Node, and
+    checks at runtime:
+
+      - property 4 (round-trip): BASE_URL's runtime value is IDENTICAL
+        to the original Python string, and the constructed url exactly
+        equals base_url + path with no alteration.
+      - property 3 (no interpolation): if `${...}` had triggered template
+        interpolation anywhere, the round-trip check above would fail --
+        `${globalThis.injected=true}` would evaluate to the string
+        'true' and corrupt the value instead of leaving it as literal
+        text, so a passing round-trip IS the proof it stayed literal.
+      - property 5 (no additional executable statement): globalThis.
+        injected -- which every payload here attempts to set as its
+        injection probe -- must remain unset.
     """
     spec = normalize({"paths": {"/products": {"get": {}}}})
-    plan = FixedLoadPlan(
-        test_type="baseline",
-        thresholds=_THRESHOLDS,
-        selected_endpoints=["/products"],
-        target_vus=10,
-        duration="10s",
-    )
-    target = TargetConfig(base_url=payload)
-    script = render_script(plan, target, spec)
+    script = render_script(_minimal_plan("/products"), TargetConfig(base_url=payload), spec)
 
     base_url_line = next(line for line in script.splitlines() if line.startswith("const BASE_URL ="))
     url_expr = _js_url_expr("/products")
@@ -155,34 +155,69 @@ def test_node_actually_evaluates_safely_no_global_pollution(name, payload):
     node_program = f"""
 {base_url_line}
 const url = {url_expr};
-if (globalThis.injected === true) {{
-  console.log("INJECTED");
-  process.exit(1);
-}}
-if (url !== {json.dumps(payload + "/products")}) {{
-  console.log("URL_MISMATCH:" + url);
-  process.exit(2);
-}}
-console.log("OK");
+console.log(JSON.stringify({{
+  injected: globalThis.injected === true,
+  baseUrlMatches: BASE_URL === {json.dumps(payload)},
+  urlMatches: url === {json.dumps(payload + "/products")},
+}}));
 """
-    result = subprocess.run(
-        ["node", "-e", node_program], capture_output=True, text=True, timeout=10
+    proc = subprocess.run(["node", "-e", node_program], capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 0, f"[{name}] node execution itself failed: {proc.stderr}"
+    result = json.loads(proc.stdout.strip())
+
+    assert result["injected"] is False, (
+        f"[{name}] globalThis.injected was set -- payload fragment executed as an additional statement"
     )
-    assert result.returncode == 0, (
-        f"[{name}] node evaluation failed (code {result.returncode}): "
-        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert result["baseUrlMatches"] is True, (
+        f"[{name}] BASE_URL's runtime value diverged from the source payload -- data did not round-trip"
     )
-    assert result.stdout.strip() == "OK"
+    assert result["urlMatches"] is True, (
+        f"[{name}] constructed URL diverged from base_url+path -- interpolation or truncation occurred"
+    )
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node not available for syntax verification")
+@_node_required
+def test_combined_malicious_base_url_and_path_do_not_cross_contaminate():
+    """Both dynamic boundaries attacked in the same script at once --
+    proves neither value's encoding can be broken out of by exploiting
+    the other's position in the generated code."""
+    base_payload = "http://evil.example`${globalThis.injected=true}"
+    path_payload = "/pr'oducts`${globalThis.injected2=true}"
+
+    spec = normalize({"paths": {path_payload: {"get": {}}}})
+    script = render_script(
+        _minimal_plan(path_payload), TargetConfig(base_url=base_payload), spec
+    )
+
+    base_url_line = next(line for line in script.splitlines() if line.startswith("const BASE_URL ="))
+    url_expr = _js_url_expr(path_payload)
+
+    node_program = f"""
+{base_url_line}
+const url = {url_expr};
+console.log(JSON.stringify({{
+  injected: globalThis.injected === true,
+  injected2: globalThis.injected2 === true,
+  urlMatches: url === {json.dumps(base_payload + path_payload)},
+}}));
+"""
+    proc = subprocess.run(["node", "-e", node_program], capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 0, f"node execution failed: {proc.stderr}"
+    result = json.loads(proc.stdout.strip())
+    assert result["injected"] is False
+    assert result["injected2"] is False
+    assert result["urlMatches"] is True
+
+
+# --- Property 6: full rendered script remains syntactically valid --------
+
+
+@_node_required
 def test_full_rendered_script_is_syntactically_valid_js():
-    """Sanity check that a malicious payload doesn't merely fail to
-    inject but ALSO doesn't break the script into invalid JS (which would
-    surface as a confusing k6 startup error rather than a clean rejection
-    upstream). Uses the demo-api-shaped spec with a checkout dependency,
-    the most complex render path, plus one injection payload.
-    """
+    """The most complex render path (checkout/cart dependency, two
+    dynamic values) with an injection payload -- proves the malicious
+    input doesn't merely fail to inject but also doesn't break the
+    script into invalid JS."""
     payload = "http://evil.example`${globalThis.injected=true}//"
     spec = normalize(
         {
@@ -221,21 +256,10 @@ def test_full_rendered_script_is_syntactically_valid_js():
             }
         }
     )
-    plan = FixedLoadPlan(
-        test_type="baseline",
-        thresholds=_THRESHOLDS,
-        selected_endpoints=[payload, "/checkout"],
-        target_vus=10,
-        duration="10s",
+    script = render_script(
+        _minimal_plan(payload, "/checkout"), TargetConfig(base_url="http://127.0.0.1:8080"), spec
     )
-    target = TargetConfig(base_url="http://127.0.0.1:8080")
-    script = render_script(plan, target, spec)
 
-    # k6's `import http from 'k6/http'` will fail under plain Node (no k6
-    # module resolution) -- strip it for a pure syntax check; k6/`import`
-    # syntax itself is standard ES module syntax Node understands fine,
-    # it's only the module resolution that would fail, and --check only
-    # parses, it doesn't execute or resolve imports.
     result = subprocess.run(
         ["node", "--input-type=module", "--check"],
         input=script,
