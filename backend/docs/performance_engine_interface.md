@@ -1,9 +1,17 @@
 # Performance Engine Interface
 
+**Status: frozen for MVP integration** (reviewed by Dev-3). `TestPlan`
+(`app/schemas/test_plan.py`) is the central contract of the whole system —
+`boundary_search` means one VU-level experiment, `fixed_load` means one
+fixed workload. Neither is ever a multi-stage stress ladder inside a
+single k6 invocation.
+
 This is the contract between the backend (Developer 1) and the performance
 engine (Developer 2: k6 script templating, schema-aware payload generation,
 subprocess execution, metrics analysis). The backend depends only on this
-interface, defined in `app/services/performance_engine.py`:
+interface, defined in `app/services/performance_engine.py`. Do not change
+this interface for a hypothetical need — only for a genuine blocking
+incompatibility discovered while integrating the real engine.
 
 ```python
 class PerformanceEngine(Protocol):
@@ -71,25 +79,87 @@ backend — the backend just persists whatever `threshold_status` the engine
 returns. Compare `plan.thresholds` (`p95_latency_ms`, `error_rate`) against
 your computed metrics using plain arithmetic.
 
-## Steady-state windowing
+## Canonical MVP result artifact: k6 summary-export (frozen)
 
-For boundary-search / demo-mode runs, PASS/FAIL should generally be based
-on the steady-state (hold) portion of the run, not the ramp-up. This means
-you likely want to parse k6's raw per-request NDJSON output
-(`k6 run --out json=raw.ndjson`) and filter by timestamp/tag rather than
-relying solely on `k6 run --summary-export=summary.json`, which aggregates
-over the entire run. `app/services/reference_k6_engine.py` (the current
-Phase-1 placeholder) does **not** do this — it uses the plain summary
-export — and is explicitly documented as a simplification to be replaced.
+The frozen MVP execution contract is:
+
+```
+k6 execution
+    ↓
+--summary-trend-stats="min,med,avg,max,p(50),p(95),p(99)"
+    ↓
+--summary-export=results.json
+```
+
+This `--summary-export` JSON is the canonical MVP result artifact. Every
+`MetricsSummary` field maps directly from it — the engine must not compute
+percentiles itself, only read what k6 already computed:
+
+| MetricsSummary field | k6 summary source |
+|---|---|
+| `p50_ms` | `p(50)` (fall back to `med` if absent) |
+| `p95_ms` | `p(95)` |
+| `p99_ms` | `p(99)` |
+| `average_ms` | `avg` |
+| `max_ms` | `max` |
+| `rps` | `http_reqs` rate |
+| `total_requests` | `http_reqs` count |
+| `error_rate` | `http_req_failed` value/rate |
+| `failed_requests` | `error_rate * total_requests` |
+
+Note k6's `--summary-export` layout has varied slightly across versions
+(stats directly on the metric object vs. nested under a `values` key) —
+handle both defensively, as `app/services/reference_k6_engine.py` does.
+
+**Raw NDJSON output (`k6 run --out json=raw.ndjson`) is NOT required for
+MVP.** It is optional future/diagnostic tooling only. This is a deliberate
+scope decision, not an oversight: boundary search is a sequence of
+*independent* k6 invocations, one per experiment (e.g. 100 VUs → one run →
+one summary; 500 VUs → a separate run → a separate summary; 1000 VUs →
+another separate run → another separate summary). There is no multi-stage
+ladder inside one invocation that would need steady-state windowing across
+raw per-request records. Do not implement raw NDJSON parsing or windowing
+for the current MVP.
 
 ## MetricsSummary fields (deterministic, never LLM-authored)
 
-`p50_ms`, `p95_ms`, `p99_ms`, `rps`, `total_requests`, `failed_requests`,
-`error_rate` (0..1), `duration_s`.
+`p50_ms`, `p95_ms`, `p99_ms`, `average_ms`, `max_ms`, `rps`,
+`total_requests`, `failed_requests`, `error_rate` (0..1), `duration_s`.
+These are persisted end-to-end (`TestResultRecord` columns) and returned
+verbatim by `GET /api/v1/runs/{id}/result` — no field is silently dropped
+between the engine outcome and the API response.
+
+## Workload safety limits (enforced before execution, not by k6)
+
+`app/services/workload_limits.py` enforces `MAX_VUS` and `MAX_DURATION_S`
+(env-configurable, see `app/core/config.py`) against every `TestPlan`
+before it is persisted or reaches the engine — for `boundary_search`,
+`ramp_duration + hold_duration` counts as the plan's total duration; for
+`fixed_load`, `duration` does. This is separate from
+`K6_EXECUTION_TIMEOUT_S`, which is a wall-clock ceiling on the k6
+*process* (protects against a hung run), not a workload-size limit. The
+engine can assume any plan it receives has already passed this gate — it
+does not need to re-validate VU counts or durations itself.
 
 ## Wiring
 
 `app/services/engine_provider.py` is the single place that decides which
 `PerformanceEngine` implementation the API uses. Point it at your real
 engine when it's ready; nothing in `app/api` or `run_service.py` needs to
-change.
+change. When you do:
+
+1. Swap the implementation in `engine_provider.py`.
+2. Run the full backend test suite.
+3. Run the real golden path against your engine.
+4. Delete `app/services/reference_k6_engine.py` — it is a **temporary**
+   Phase-1 placeholder (bare GET requests, no payload generation, no
+   auth), not a second production-selectable engine architecture. Once
+   your engine is wired in, remove it and any documentation that still
+   points at it.
+
+## Target environments
+
+MVP targets are **local / staging / sandbox only**. Production load
+testing is explicitly out of scope for the current phase — there is no
+target-authorization workflow, rate limiting, or safety review for hitting
+a real production service, and none should be assumed.

@@ -3,8 +3,10 @@
 This module defines the CONTRACT only. The backend depends on this
 Protocol, never on a concrete renderer/runner/metrics implementation.
 Developer 2's real engine (k6 script templating, payload generation,
-subprocess execution, steady-state-aware metrics analysis) must implement
-`PerformanceEngine` and nothing else needs to change in run_service.py.
+subprocess execution, metrics analysis from k6's --summary-export -- the
+frozen MVP result artifact, see performance_engine_interface.md) must
+implement `PerformanceEngine` and nothing else needs to change in
+run_service.py.
 
 Full contract writeup: backend/docs/performance_engine_interface.md
 """
