@@ -52,25 +52,39 @@ class EngineExecutionOutcome(BaseModel):
 
 ## The one rule that actually matters: execution failure vs. performance failure
 
+**Amended by the Dev-3 gate review (BLOCKER 2, commit `585a177`).** The
+original version of this doc said a present results artifact was a
+legitimate result "even if `exit_code != 0`". That was wrong and has been
+fixed in the real engine: a non-zero k6 exit code is *always* an execution
+failure, full stop — a `results.json` that happens to exist on disk (e.g.
+from a script/runtime error partway through, or the process being killed
+after partially flushing output) never overrides a failed process.
+
 The backend (`run_service.execute_run`) branches on this outcome exactly one way:
 
-- **`summary_exists=True` and `metrics` and `threshold_status` are set**
-  → treated as a legitimate performance result, *even if* `exit_code != 0`
-  (e.g. k6's own native thresholds failed). `TestRun` → `COMPLETED`, a
-  `TestResult` row is persisted with whatever `threshold_status` you give.
-- **anything else** (`summary_exists=False`, or the engine raises) →
-  treated as an actual execution failure. `TestRun` → `EXECUTION_ERROR`,
+- **`exit_code == 0` and a usable results artifact exists** → the engine
+  parses metrics and evaluates thresholds, returning `summary_exists=True`
+  with `metrics` and `threshold_status` set. This is a legitimate
+  performance result, whether `threshold_status` comes out `PASS` or
+  `FAIL`. `TestRun` → `COMPLETED`, a `TestResult` row is persisted with
+  whatever `threshold_status` you give.
+- **anything else** — `exit_code != 0` (regardless of whether a results
+  artifact exists), a missing/malformed results artifact, or the engine
+  raises — → `summary_exists=False`, `metrics=None`, `threshold_status=None`.
+  Treated as an actual execution failure. `TestRun` → `EXECUTION_ERROR`,
   `error_message` is stored, **no** `TestResult` is created. This must
   never be reinterpreted as a performance `FAIL` — the adaptive
   boundary-search engine (Phase 2) only ever sees clean PASS/FAIL results
   and would corrupt its search on a swallowed execution error.
 
-Concretely: if k6 fails to start, the script has a syntax error, the target
-is unreachable before any requests complete, or the process times out —
-return `summary_exists=False` with `error_message` explaining why (or just
-raise; the backend catches it and records the message). If the test ran to
-completion and produced metrics, return `summary_exists=True` regardless of
-whether thresholds passed.
+Concretely: if k6 fails to start, the script has a syntax error, the
+process exits non-zero for any reason (including a crossed k6-native
+threshold, if one is ever configured), the target is unreachable before
+any requests complete, or the process times out — return
+`summary_exists=False` with `error_message` explaining why (or just raise;
+the backend catches it and records the message). Only return
+`summary_exists=True` when the process exited `0` *and* you have real
+metrics to report.
 
 ## `threshold_status` is yours to compute, but must be deterministic
 
