@@ -16,6 +16,10 @@ venv/
 # k6 / run artifacts
 artifacts/
 *.log
+demo-api/tools/k6/
+
+# pytest
+.pytest_cache/
 
 # Node (frontend, later)
 node_modules/

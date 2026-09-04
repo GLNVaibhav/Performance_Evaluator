@@ -32,4 +32,5 @@ service, run lifecycle, domain contracts, and persistence layer.
 
 ```
 backend/       FastAPI app, domain schemas, run lifecycle, persistence
+demo-api/      Canonical e-commerce demo target for performance testing
 ```
