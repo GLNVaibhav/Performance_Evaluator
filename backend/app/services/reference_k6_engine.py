@@ -3,8 +3,7 @@
 This exists ONLY to prove the Phase-1 golden path end to end (real k6
 subprocess, real output, real metrics) while Developer 2's actual
 performance engine (proper Jinja2 script templates, schema-aware payload
-generation, steady-state-windowed metrics from raw NDJSON output) does not
-exist yet.
+generation) does not exist yet.
 
 Do not extend this module with real product features. When Developer 2's
 engine lands, this file should be deleted and whatever wires an engine
@@ -12,11 +11,16 @@ into the API layer should point at theirs instead -- `PerformanceEngine`
 is the only contract that matters, not this class.
 
 Known simplifications vs. the real engine (documented, not silent):
-  - Uses k6's own --summary-export instead of raw NDJSON, so it cannot do
-    steady-state-only windowing (see performance_engine_interface.md).
   - Issues a bare GET to each selected endpoint; no schema-aware payload
     generation.
   - No auth support.
+
+Uses k6's --summary-export as the result artifact -- this is the frozen
+MVP contract (see performance_engine_interface.md), not a simplification.
+Raw NDJSON / steady-state windowing is explicitly out of scope for MVP:
+boundary search runs one k6 invocation per experiment (one VU level, one
+summary), so there is no multi-stage ladder inside a single run that would
+need windowing.
 """
 
 import json
@@ -30,7 +34,11 @@ from app.schemas.enums import ObjectiveType, ResultClassification
 from app.schemas.test_plan import TargetConfig, TestPlan
 from app.schemas.test_result import EngineExecutionOutcome, MetricsSummary
 
-_SUMMARY_TREND_STATS = "min,avg,med,p(90),p(95),p(99),max"
+# Frozen MVP canonical result artifact command line -- see
+# docs/performance_engine_interface.md. Dev-2's real engine must invoke k6
+# the same way (same trend stats, --summary-export) for the same reason:
+# these are exactly the fields MetricsSummary needs, nothing more.
+_SUMMARY_TREND_STATS = "min,med,avg,max,p(50),p(95),p(99)"
 
 
 def _render_script(plan: TestPlan, target: TargetConfig) -> str:
@@ -105,9 +113,11 @@ def _parse_summary(summary_path: Path, duration_s: float) -> MetricsSummary:
     error_rate = float(failed_stats.get("value", failed_stats.get("rate", 0.0)))
 
     return MetricsSummary(
-        p50_ms=float(duration_stats.get("med", 0.0)),
+        p50_ms=float(duration_stats.get("p(50)", duration_stats.get("med", 0.0))),
         p95_ms=float(duration_stats.get("p(95)", 0.0)),
         p99_ms=float(duration_stats.get("p(99)", 0.0)),
+        average_ms=float(duration_stats.get("avg", 0.0)),
+        max_ms=float(duration_stats.get("max", 0.0)),
         rps=float(reqs_stats.get("rate", 0.0)),
         total_requests=total_requests,
         failed_requests=round(error_rate * total_requests),

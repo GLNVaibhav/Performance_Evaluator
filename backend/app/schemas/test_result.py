@@ -7,9 +7,15 @@ from app.schemas.enums import ResultClassification
 
 
 class MetricsSummary(BaseModel):
+    """Canonical MVP metrics contract. Values are whatever the performance
+    engine computed (from k6's --summary-export) -- the backend never
+    calculates percentiles/averages itself, only stores and serves them."""
+
     p50_ms: float
     p95_ms: float
     p99_ms: float
+    average_ms: float
+    max_ms: float
     rps: float
     total_requests: int
     failed_requests: int

@@ -46,6 +46,8 @@ class TestResultRecord(Base):
     p50_ms: Mapped[float] = mapped_column(Float, nullable=False)
     p95_ms: Mapped[float] = mapped_column(Float, nullable=False)
     p99_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    average_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    max_ms: Mapped[float] = mapped_column(Float, nullable=False)
     rps: Mapped[float] = mapped_column(Float, nullable=False)
     total_requests: Mapped[int] = mapped_column(Integer, nullable=False)
     failed_requests: Mapped[int] = mapped_column(Integer, nullable=False)

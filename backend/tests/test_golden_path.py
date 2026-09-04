@@ -43,6 +43,8 @@ def test_golden_path_baseline_checkout(client, stub_target_url):
         "p50_ms",
         "p95_ms",
         "p99_ms",
+        "average_ms",
+        "max_ms",
         "rps",
         "total_requests",
         "failed_requests",
@@ -54,3 +56,5 @@ def test_golden_path_baseline_checkout(client, stub_target_url):
     assert metrics["total_requests"] > 0
     assert metrics["failed_requests"] == 0  # stub target always returns 200
     assert metrics["error_rate"] == 0.0
+    assert metrics["max_ms"] >= metrics["average_ms"] >= 0
+    assert metrics["max_ms"] >= metrics["p99_ms"] >= metrics["p95_ms"] >= metrics["p50_ms"] >= 0
