@@ -14,6 +14,13 @@ endpoint, the rendered script always creates a cart first (in the same
 iteration) and threads its cart_id into the checkout body. This is one
 hardcoded case for one known dependency in the canonical target, not a
 general dependency resolver.
+
+SECURITY: every dynamic value that reaches the generated script (base_url,
+OpenAPI-derived resolved paths -- which may themselves come from an
+externally-fetched target spec) is encoded via json.dumps() into a JS
+string literal and never interpolated into a backtick template literal or
+a naively-quoted string. See _js_url_expr(). Regression tests:
+tests/k6_engine/test_script_renderer.py.
 """
 from __future__ import annotations
 
@@ -38,19 +45,32 @@ def _stages_js(plan: TestPlan) -> str:
     return f"{{ duration: '{plan.duration}', target: {plan.target_vus} }},"
 
 
+def _js_url_expr(resolved_path: str) -> str:
+    """BASE_URL + <safe JSON-encoded path literal>.
+
+    Deliberately never builds a backtick template literal with dynamic
+    content -- `${...}` and backtick have no special meaning inside a
+    json.dumps-produced double-quoted string, so concatenating two
+    already-safe JS string literals with `+` structurally eliminates the
+    injection class (quote/backtick/template-expression breakout, newline,
+    backslash) rather than merely escaping around it. See BLOCKER 1 fix.
+    """
+    return f"BASE_URL + {json.dumps(resolved_path)}"
+
+
 def _request_snippet(resolved: ResolvedEndpoint, var_prefix: str) -> tuple[str, str]:
     """Returns (js_statements, response_variable_name)."""
     method = resolved.spec.method
-    url = f"`${{BASE_URL}}{resolved.resolved_path}`"
+    url_expr = _js_url_expr(resolved.resolved_path)
     res_var = f"res_{var_prefix}"
 
     if method == "get":
-        return f"const {res_var} = http.get({url});", res_var
+        return f"const {res_var} = http.get({url_expr});", res_var
 
     body = generate_request_body(resolved.spec.request_schema)
     body_json = json.dumps(body if body is not None else {})
     stmt = (
-        f"const {res_var} = http.{method}({url}, JSON.stringify({body_json}), "
+        f"const {res_var} = http.{method}({url_expr}, JSON.stringify({body_json}), "
         f"{{ headers: {{ 'Content-Type': 'application/json' }} }});"
     )
     return stmt, res_var
@@ -61,12 +81,14 @@ def _render_checkout_with_cart_dependency(spec: NormalizedOpenAPI, checkout: Res
     cart_resolved = cart_candidates[0]
     cart_body = generate_request_body(cart_resolved.spec.request_schema)
     checkout_body = generate_request_body(checkout.spec.request_schema) or {}
+    cart_url_expr = _js_url_expr(cart_resolved.resolved_path)
+    checkout_url_expr = _js_url_expr(checkout.resolved_path)
 
     return f"""\
   // Special-cased dependency: /checkout requires a real cart_id from a
   // prior /cart call -- see script_renderer.py module docstring.
   const cartRes = http.post(
-    `${{BASE_URL}}{cart_resolved.resolved_path}`,
+    {cart_url_expr},
     JSON.stringify({json.dumps(cart_body)}),
     {{ headers: {{ 'Content-Type': 'application/json' }} }}
   );
@@ -74,7 +96,7 @@ def _render_checkout_with_cart_dependency(spec: NormalizedOpenAPI, checkout: Res
   try {{ cartId = JSON.parse(cartRes.body).cart_id; }} catch (e) {{ cartId = null; }}
   const checkoutBody = Object.assign({{}}, {json.dumps(checkout_body)}, {{ cart_id: cartId }});
   const res_checkout = http.post(
-    `${{BASE_URL}}{checkout.resolved_path}`,
+    {checkout_url_expr},
     JSON.stringify(checkoutBody),
     {{ headers: {{ 'Content-Type': 'application/json' }} }}
   );
@@ -121,7 +143,7 @@ export const options = {{
   }},
 }};
 
-const BASE_URL = '{target.base_url}';
+const BASE_URL = {json.dumps(target.base_url)};
 
 export default function () {{
 {dispatch}
