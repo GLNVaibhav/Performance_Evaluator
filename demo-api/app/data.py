@@ -1,6 +1,6 @@
 from typing import Dict, List
 
-from app.models import Product
+from app.models import Category, Product
 
 PRODUCTS: List[Product] = [
     Product(id=1, name="Laptop", price=799.99, category="electronics", inventory=10),
@@ -14,3 +14,16 @@ PRODUCTS: List[Product] = [
 ]
 
 PRODUCTS_BY_ID: Dict[int, Product] = {product.id: product for product in PRODUCTS}
+
+# Derived from the existing Product.category strings (not a separate,
+# hand-maintained taxonomy that could drift out of sync) -- gives the
+# catalog a real relational shape (Category 1..N -> Products) for weighted
+# read-heavy traffic without inventing unrelated data.
+CATEGORIES: List[Category] = [
+    Category(id=1, name="electronics", description="Computers, peripherals, and electronic accessories"),
+    Category(id=2, name="accessories", description="General accessories and add-ons"),
+    Category(id=3, name="audio", description="Headphones and audio equipment"),
+    Category(id=4, name="office", description="Office and desk equipment"),
+]
+
+CATEGORIES_BY_ID: Dict[int, Category] = {category.id: category for category in CATEGORIES}
