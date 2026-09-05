@@ -94,6 +94,7 @@ Defined in `app/schemas/intent.py`. Field-by-field:
 | `load_profile.peak_users` | `Optional[PositiveInt]` | Ceiling to probe. Used by `stress`. |
 | `duration` | `Optional[str]` | k6-style duration string (`^\d+(ms\|s\|m\|h)$`, same pattern as `TestPlan`). Required for `baseline`/`soak`; optional for `stress` (see [Section 6](#6-test-type-semantics)). |
 | `target_scope.endpoints` | `Optional[List[str]]` | The only supported targeting mechanism for MVP. Required to compile. |
+| `target_scope.endpoint_weights` | `Optional[Dict[str, float]]` | **Phase 0 addition.** Mirrors `TestPlan.endpoint_weights` exactly (e.g. `{"/products": 60, "/search": 25, "/checkout": 15}`). Omitting it means uniform dispatch, unchanged. Passed straight through to the compiled plan; validated once, authoritatively, by `TestPlan`'s own validator (not re-implemented here) -- see [Section 7](#7-intenttotestplancompiler). |
 | `business_flow` | `Optional[BusinessFlow]` | Structural placeholder (`{name, steps}}`, or a bare list shorthand). **Always rejected** by the compiler today -- see [Section 8](#8-business-flow-representation). |
 | `success_criteria.p95_latency_ms` | `Optional[PositiveInt]` | Optional; deterministic default applied if absent (see compiler). |
 | `success_criteria.error_rate` | `Optional[float, 0..1]` | Optional; deterministic default applied if absent. |
@@ -211,7 +212,8 @@ Order of checks:
 5. **Build the `TestPlan`** (`FixedLoadPlan` or `BoundarySearchPlan`) using
    ordinary Pydantic construction -- this reuses `app/schemas/test_plan.py`
    validation as-is; the compiler does not duplicate it.
-6. **`validate_workload_limits(plan)`** -- the *same* function
+6. **Endpoint weights pass-through** (Phase 0 addition): `target_scope.endpoint_weights`, if present, is passed unmodified into the constructed plan. If `TestPlan`'s own validator rejects it (mismatched keys against `selected_endpoints`, or a non-positive weight), that `ValidationError` is caught and translated into `INVALID` / `invalid_endpoint_weights` -- the same "reuse, don't duplicate" approach `validate_workload_limits` already uses one step below.
+7. **`validate_workload_limits(plan)`** -- the *same* function
    `run_service.create_run` calls for a hand-authored `TestPlan`
    (`app/services/workload_limits.py`). Exceeding `MAX_VUS` or
    `MAX_DURATION_S` here produces `INVALID` /
@@ -219,7 +221,7 @@ Order of checks:
    intent-originated plans -- an intent has exactly the same ceiling a
    structured `TestPlan` submitted directly to `POST /api/v1/runs`
    already had.
-7. Otherwise, **`READY`** with the compiled `test_plan`.
+8. Otherwise, **`READY`** with the compiled `test_plan`.
 
 ## 8. Business flow representation
 

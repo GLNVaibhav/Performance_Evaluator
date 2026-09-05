@@ -25,6 +25,42 @@ def test_compile_baseline_intent_returns_ready_and_test_plan(client):
     assert body["test_plan"]["target_vus"] == 50
 
 
+def test_compile_endpoint_weights_flow_through_to_the_compiled_test_plan(client):
+    resp = client.post(
+        "/api/v1/intents/compile",
+        json={
+            "test_type": "baseline",
+            "load_profile": {"concurrent_users": 50},
+            "duration": "30s",
+            "target_scope": {
+                "endpoints": ["/products", "/search", "/checkout"],
+                "endpoint_weights": {"/products": 60, "/search": 25, "/checkout": 15},
+            },
+            "success_criteria": {"p95_latency_ms": 500, "error_rate": 0.01},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "READY"
+    assert body["test_plan"]["endpoint_weights"] == {"/products": 60, "/search": 25, "/checkout": 15}
+
+
+def test_compile_invalid_endpoint_weights_returns_structured_invalid_not_a_500(client):
+    resp = client.post(
+        "/api/v1/intents/compile",
+        json={
+            "test_type": "baseline",
+            "load_profile": {"concurrent_users": 50},
+            "duration": "30s",
+            "target_scope": {"endpoints": ["/products", "/checkout"], "endpoint_weights": {"/products": 100}},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "INVALID"
+    assert body["rejection_code"] == "invalid_endpoint_weights"
+
+
 def test_compile_missing_fields_returns_needs_clarification(client):
     resp = client.post("/api/v1/intents/compile", json={"test_type": "baseline"})
 

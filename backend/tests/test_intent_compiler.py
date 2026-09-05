@@ -233,3 +233,136 @@ def test_compilation_is_deterministic():
     assert result_a.test_plan.model_dump() == result_b.test_plan.model_dump()
     # Sanity: not just comparing default-constructed objects to themselves.
     assert result_a.test_plan.model_dump() == compile_intent(intent).test_plan.model_dump()
+
+
+# --- Endpoint traffic weights (Phase 0: intent -> TestPlan.endpoint_weights) --
+#
+# These prove the COMPLETE UniversalPerformanceIntent -> compile_intent() ->
+# TestPlan contract, not just TestPlan's own validator (already covered by
+# tests/test_endpoint_mix_schema.py) -- every case here goes in as intent
+# JSON and comes out as (or is rejected before becoming) a compiled plan.
+
+
+def test_intent_without_endpoint_weights_compiles_with_uniform_behaviour():
+    """Omitting endpoint_weights entirely must be indistinguishable from
+    before this field existed: the compiled plan's endpoint_weights is
+    None, meaning uniform dispatch (see script_renderer.py)."""
+    intent = _baseline_intent(target_scope={"endpoints": ["/products", "/checkout"]})
+    result = compile_intent(intent)
+
+    assert result.status == IntentStatus.READY
+    assert result.test_plan.endpoint_weights is None
+
+
+def test_intent_with_valid_endpoint_weights_compiles_and_matches_exactly():
+    weights = {"/products": 60, "/search": 25, "/checkout": 15}
+    intent = _baseline_intent(
+        target_scope={"endpoints": ["/products", "/search", "/checkout"], "endpoint_weights": weights}
+    )
+    result = compile_intent(intent)
+
+    assert result.status == IntentStatus.READY
+    assert result.test_plan.endpoint_weights == weights
+
+
+def test_intent_endpoint_weights_need_not_sum_to_100():
+    """The intent layer imposes no normalization -- it passes weights
+    through verbatim and TestPlan's own validator (which only requires
+    positivity, not a particular sum) is the sole authority."""
+    intent = _baseline_intent(
+        target_scope={"endpoints": ["/products", "/search", "/checkout"], "endpoint_weights": {"/products": 6, "/search": 3, "/checkout": 1}}
+    )
+    result = compile_intent(intent)
+
+    assert result.status == IntentStatus.READY
+    assert result.test_plan.endpoint_weights == {"/products": 6, "/search": 3, "/checkout": 1}
+
+
+def test_intent_with_negative_endpoint_weight_is_rejected():
+    intent = _baseline_intent(
+        target_scope={"endpoints": ["/products", "/checkout"], "endpoint_weights": {"/products": -1, "/checkout": 40}}
+    )
+    result = compile_intent(intent)
+
+    assert result.status == IntentStatus.INVALID
+    assert result.rejection_code == RejectionCode.INVALID_ENDPOINT_WEIGHTS
+    assert result.test_plan is None
+
+
+def test_intent_with_zero_endpoint_weight_is_rejected():
+    intent = _baseline_intent(
+        target_scope={"endpoints": ["/products", "/checkout"], "endpoint_weights": {"/products": 0, "/checkout": 40}}
+    )
+    result = compile_intent(intent)
+
+    assert result.status == IntentStatus.INVALID
+    assert result.rejection_code == RejectionCode.INVALID_ENDPOINT_WEIGHTS
+
+
+def test_intent_missing_weight_for_a_selected_endpoint_is_rejected():
+    """A malformed mapping that omits a selected endpoint must be rejected,
+    never silently treated as "unweighted" -- that would be exactly the
+    kind of hidden inference this compiler must never do."""
+    intent = _baseline_intent(
+        target_scope={"endpoints": ["/products", "/checkout"], "endpoint_weights": {"/products": 100}}
+    )
+    result = compile_intent(intent)
+
+    assert result.status == IntentStatus.INVALID
+    assert result.rejection_code == RejectionCode.INVALID_ENDPOINT_WEIGHTS
+
+
+def test_intent_weight_for_an_unselected_endpoint_is_rejected():
+    intent = _baseline_intent(
+        target_scope={
+            "endpoints": ["/products", "/checkout"],
+            "endpoint_weights": {"/products": 60, "/checkout": 30, "/search": 10},
+        }
+    )
+    result = compile_intent(intent)
+
+    assert result.status == IntentStatus.INVALID
+    assert result.rejection_code == RejectionCode.INVALID_ENDPOINT_WEIGHTS
+
+
+def test_stress_intent_with_endpoint_weights_compiles_to_boundary_search_plan():
+    """Both compiled plan variants support endpoint_weights (it lives on
+    _PlanBase), so the intent-layer pass-through must work for stress too,
+    not just baseline/soak."""
+    intent = UniversalPerformanceIntent.model_validate(
+        {
+            "test_type": "stress",
+            "load_profile": {"peak_users": 500},
+            "duration": "20s",
+            "target_scope": {
+                "endpoints": ["/products", "/checkout"],
+                "endpoint_weights": {"/products": 70, "/checkout": 30},
+            },
+        }
+    )
+    result = compile_intent(intent)
+
+    assert result.status == IntentStatus.READY
+    assert isinstance(result.test_plan, BoundarySearchPlan)
+    assert result.test_plan.endpoint_weights == {"/products": 70, "/checkout": 30}
+
+
+def test_intent_endpoint_weights_do_not_affect_clarification_or_invalid_paths():
+    """Existing NEEDS_CLARIFICATION / INVALID behaviour for unrelated
+    problems is unchanged by this feature -- endpoint_weights being valid
+    doesn't paper over a missing duration, and business_flow is still
+    rejected outright regardless of endpoint_weights being present."""
+    missing_duration = _baseline_intent(
+        duration=None,
+        target_scope={"endpoints": ["/products", "/checkout"], "endpoint_weights": {"/products": 60, "/checkout": 40}},
+    )
+    result = compile_intent(missing_duration)
+    assert result.status == IntentStatus.NEEDS_CLARIFICATION
+
+    with_business_flow = _baseline_intent(
+        business_flow=["browse", "checkout"],
+        target_scope={"endpoints": ["/products", "/checkout"], "endpoint_weights": {"/products": 60, "/checkout": 40}},
+    )
+    result = compile_intent(with_business_flow)
+    assert result.status == IntentStatus.INVALID
+    assert result.rejection_code == RejectionCode.UNSUPPORTED_BUSINESS_FLOW

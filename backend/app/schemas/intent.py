@@ -19,7 +19,7 @@ into an existing, already-validated TestPlan.
 See backend/docs/ai_intent_architecture.md for the full architecture.
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, PositiveInt, field_validator
 
@@ -43,6 +43,16 @@ class TargetScope(BaseModel):
     for MVP. See BusinessFlow for the (currently unsupported) alternative."""
 
     endpoints: Optional[List[str]] = None
+    # Additive (Phase 0 of the endpoint-intelligence integration). Mirrors
+    # app/schemas/test_plan.py::_PlanBase.endpoint_weights exactly, e.g.
+    # {"/products": 60, "/search": 25, "/checkout": 15}. Omitting it means
+    # uniform dispatch across `endpoints`, unchanged from before this field
+    # existed. Only structural typing lives here -- the authoritative
+    # semantic checks (every selected endpoint has exactly one positive
+    # weight) live solely on TestPlan's own validator and are reused, never
+    # duplicated, by intent_compiler.compile_intent(). The intent layer
+    # never invents or infers a weight the caller didn't supply.
+    endpoint_weights: Optional[Dict[str, float]] = None
 
 
 class BusinessFlow(BaseModel):

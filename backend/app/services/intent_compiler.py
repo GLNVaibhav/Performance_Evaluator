@@ -14,10 +14,25 @@ structured-TestPlan path itself would reject.
 
 See backend/docs/ai_intent_architecture.md for the full architecture and
 the rationale behind each rule below.
+
+--- Endpoint traffic weights (Phase 0 integration, additive) --------------
+
+UniversalPerformanceIntent.target_scope.endpoint_weights maps straight
+through to TestPlan.endpoint_weights, unmodified. This module does NOT
+re-validate the weights (no duplicated key-match/positivity checks) --
+TestPlan's own model_validator is the sole authority, and its
+ValidationError is caught below and translated into a structured INVALID
+result, the same pattern already used for WorkloadLimitExceededError. If
+target_scope.endpoint_weights is omitted, the compiled plan's
+endpoint_weights is None, which is exactly TestPlan's own pre-existing
+"uniform dispatch" default -- nothing here invents or infers a weight the
+caller didn't supply.
 """
 
 import re
 from typing import List, Optional, Tuple
+
+from pydantic import ValidationError
 
 from app.schemas.enums import IntentStatus, ObjectiveType, TestType
 from app.schemas.intent import (
@@ -55,6 +70,7 @@ class RejectionCode:
     UNSUPPORTED_BUSINESS_FLOW = "unsupported_business_flow"
     INVALID_ENDPOINT = "invalid_endpoint"
     WORKLOAD_LIMIT_EXCEEDED = "workload_limit_exceeded"
+    INVALID_ENDPOINT_WEIGHTS = "invalid_endpoint_weights"
 
 
 def _invalid(intent: UniversalPerformanceIntent, code: str, reason: str) -> IntentCompilationResponse:
@@ -226,38 +242,53 @@ def compile_intent(intent: UniversalPerformanceIntent) -> IntentCompilationRespo
         error_rate=sc.error_rate if sc.error_rate is not None else DEFAULT_ERROR_RATE,
     )
 
+    # Passed straight through, unmodified -- the intent layer never invents
+    # or infers a weight the caller didn't supply. `None` (the field's
+    # default) means exactly what it means on TestPlan itself: uniform
+    # dispatch across `endpoints`. Semantic validation (every selected
+    # endpoint has exactly one positive weight) is NOT re-implemented here
+    # -- it is enforced once, authoritatively, by TestPlan's own
+    # model_validator when the plan below is constructed, and any failure
+    # there is caught and translated into a structured INVALID result.
+    endpoint_weights = intent.target_scope.endpoint_weights
+
     plan: TestPlan
-    if intent.test_type == TestType.stress:
-        if intent.duration is not None:
-            hold_duration = intent.duration
-        else:
-            hold_duration = DEFAULT_STRESS_HOLD_DURATION
-            assumptions.append(f"hold_duration defaulted to {DEFAULT_STRESS_HOLD_DURATION}")
-        assumptions.append(
-            f"ramp_duration set to fixed default {DEFAULT_STRESS_RAMP_DURATION} "
-            "(the intent contract has no separate ramp field)"
-        )
-        plan = BoundarySearchPlan(
-            objective_type=ObjectiveType.boundary_search,
-            test_type=intent.test_type,
-            target_vus=target_vus,
-            ramp_duration=DEFAULT_STRESS_RAMP_DURATION,
-            hold_duration=hold_duration,
-            thresholds=thresholds,
-            selected_endpoints=endpoints,
-            assumptions=assumptions,
-        )
-    else:  # baseline / soak
-        assert intent.duration is not None
-        plan = FixedLoadPlan(
-            objective_type=ObjectiveType.fixed_load,
-            test_type=intent.test_type,
-            target_vus=target_vus,
-            duration=intent.duration,
-            thresholds=thresholds,
-            selected_endpoints=endpoints,
-            assumptions=assumptions,
-        )
+    try:
+        if intent.test_type == TestType.stress:
+            if intent.duration is not None:
+                hold_duration = intent.duration
+            else:
+                hold_duration = DEFAULT_STRESS_HOLD_DURATION
+                assumptions.append(f"hold_duration defaulted to {DEFAULT_STRESS_HOLD_DURATION}")
+            assumptions.append(
+                f"ramp_duration set to fixed default {DEFAULT_STRESS_RAMP_DURATION} "
+                "(the intent contract has no separate ramp field)"
+            )
+            plan = BoundarySearchPlan(
+                objective_type=ObjectiveType.boundary_search,
+                test_type=intent.test_type,
+                target_vus=target_vus,
+                ramp_duration=DEFAULT_STRESS_RAMP_DURATION,
+                hold_duration=hold_duration,
+                thresholds=thresholds,
+                selected_endpoints=endpoints,
+                endpoint_weights=endpoint_weights,
+                assumptions=assumptions,
+            )
+        else:  # baseline / soak
+            assert intent.duration is not None
+            plan = FixedLoadPlan(
+                objective_type=ObjectiveType.fixed_load,
+                test_type=intent.test_type,
+                target_vus=target_vus,
+                duration=intent.duration,
+                thresholds=thresholds,
+                selected_endpoints=endpoints,
+                endpoint_weights=endpoint_weights,
+                assumptions=assumptions,
+            )
+    except ValidationError as exc:
+        return _invalid(intent, RejectionCode.INVALID_ENDPOINT_WEIGHTS, str(exc))
 
     try:
         validate_workload_limits(plan)
