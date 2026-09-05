@@ -35,4 +35,29 @@ K6_EXECUTION_TIMEOUT_S = int(os.environ.get("K6_EXECUTION_TIMEOUT_S", "120"))
 MAX_VUS = int(os.environ.get("MAX_VUS", "2000"))
 MAX_DURATION_S = int(os.environ.get("MAX_DURATION_S", "90"))
 
+# LLM intent interpreter (app/services/llm_intent_interpreter.py). OpenAI-
+# compatible chat-completions API: works unmodified against OpenAI itself
+# and any compatible provider (Groq, OpenRouter, a local server, etc.) by
+# pointing LLM_BASE_URL at it -- no per-provider SDK, no extra dependency
+# (uses httpx, already required). LLM_API_KEY has no default on purpose --
+# never commit a key, never silently fall back to a hardcoded one.
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
+LLM_TIMEOUT_S = float(os.environ.get("LLM_TIMEOUT_S", "20"))
+
+# Known endpoints the demo target actually exposes (verified live against
+# demo-api's /openapi.json during the target-validation review -- not
+# invented). Given to LLMIntentInterpreter as the closed set it must pick
+# target_scope.endpoints from; overridable via env for a different target
+# without a code change.
+LLM_KNOWN_ENDPOINTS = [
+    e.strip()
+    for e in os.environ.get(
+        "LLM_KNOWN_ENDPOINTS",
+        "/products,/products/{product_id},/categories,/categories/{category_id},/cart,/checkout",
+    ).split(",")
+    if e.strip()
+]
+
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
