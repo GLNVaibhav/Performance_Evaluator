@@ -8,17 +8,32 @@ existing `POST /api/v1/runs` -- execution is a separate, explicit action so
 a UI can show the compiled plan for confirmation first.
 """
 
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from app.core.config import LLM_KNOWN_ENDPOINTS
 from app.schemas.intent import IntentCompilationResponse, UniversalPerformanceIntent
 from app.services.intent_compiler import compile_intent
 from app.services.intent_interpreter import InterpretationResult
 from app.services.interpreter_provider import get_intent_interpreter
 
 router = APIRouter(prefix="/intents", tags=["intents"])
+
+
+class KnownEndpointsResponse(BaseModel):
+    """The closed set app/services/llm_intent_interpreter.py enforces
+    endpoint selection against (see its containment check) -- exposed
+    read-only so a frontend can show what's actually testable without
+    hardcoding or guessing the same list independently."""
+
+    endpoints: List[str]
+
+
+@router.get("/known-endpoints", response_model=KnownEndpointsResponse)
+def known_endpoints_endpoint() -> KnownEndpointsResponse:
+    return KnownEndpointsResponse(endpoints=LLM_KNOWN_ENDPOINTS)
 
 
 @router.post("/compile", response_model=IntentCompilationResponse)
