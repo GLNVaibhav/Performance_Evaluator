@@ -92,11 +92,16 @@ def execute_run(run_id: str, engine: PerformanceEngine) -> None:
             repository.mark_run_execution_error(db, run_id, f"engine raised: {exc}")
             return
 
-        # --- Execution result distinction (see spec) ---
-        # summary_exists True  -> the test executed; a legitimate performance
-        #                         result exists even if exit_code != 0
-        #                         (thresholds failed).
-        # summary_exists False -> actual execution failure. Must never be
+        # --- Execution result distinction (see docs/performance_engine_interface.md) ---
+        # summary_exists True  -> the engine already confirmed exit_code == 0
+        #                         AND a usable results artifact -- a
+        #                         legitimate performance result, whether
+        #                         threshold_status is PASS or FAIL.
+        # summary_exists False -> actual execution failure (this covers a
+        #                         non-zero exit_code even when a results
+        #                         artifact happens to exist on disk -- the
+        #                         engine is responsible for that check, not
+        #                         this function). Must never be
         #                         reinterpreted as a performance FAIL.
         if outcome.summary_exists and outcome.metrics is not None and outcome.threshold_status is not None:
             repository.save_result(db, run_id, outcome.metrics, outcome.threshold_status)
