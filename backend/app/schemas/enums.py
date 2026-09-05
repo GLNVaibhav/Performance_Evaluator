@@ -27,3 +27,13 @@ class ResultClassification(str, Enum):
 
     PASS = "PASS"
     FAIL = "FAIL"
+
+
+class IntentStatus(str, Enum):
+    """Outcome of compiling a UniversalPerformanceIntent. Never produced by
+    an LLM -- computed deterministically by app/services/intent_compiler.py.
+    See backend/docs/ai_intent_architecture.md."""
+
+    READY = "READY"
+    NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
+    INVALID = "INVALID"
