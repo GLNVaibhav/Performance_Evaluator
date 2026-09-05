@@ -104,7 +104,9 @@ def execute_run(run_id: str, engine: PerformanceEngine) -> None:
         #                         this function). Must never be
         #                         reinterpreted as a performance FAIL.
         if outcome.summary_exists and outcome.metrics is not None and outcome.threshold_status is not None:
-            repository.save_result(db, run_id, outcome.metrics, outcome.threshold_status)
+            repository.save_result(
+                db, run_id, outcome.metrics, outcome.threshold_status, outcome.threshold_violations
+            )
             repository.mark_run_completed(db, run_id)
         else:
             message = outcome.error_message or (

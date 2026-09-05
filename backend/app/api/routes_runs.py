@@ -1,10 +1,13 @@
+from pathlib import Path
+from typing import Optional
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.schemas.enums import RunState
 from app.schemas.run import RunCreateRequest, RunCreateResponse, RunStatusResponse
-from app.schemas.test_result import TestResult
+from app.schemas.test_result import ArtifactRefs, TestResult
 from app.services import run_service
 from app.services.engine_provider import get_performance_engine
 from app.services.workload_limits import WorkloadLimitExceededError
@@ -69,4 +72,31 @@ def get_run_result(run_id: str, db: Session = Depends(get_db)) -> TestResult:
         # run_service's completion path, not a client error.
         raise HTTPException(status_code=500, detail="run completed but no result was recorded")
 
-    return repository.result_record_to_schema(result_record)
+    result = repository.result_record_to_schema(result_record)
+
+    # --- Additive result-model enrichment (endpoint mix + per-endpoint
+    # evidence phase). Purely assembled from data already persisted/
+    # produced elsewhere -- no new computation, no LLM, no speculation. ---
+    plan_record = repository.get_plan(db, run_record.plan_id)
+    plan = repository.load_plan_model(plan_record) if plan_record is not None else None
+
+    artifact_dir = Path(run_record.artifact_dir)
+
+    def _existing_path(filename: str) -> Optional[str]:
+        candidate = artifact_dir / filename
+        return str(candidate) if candidate.exists() else None
+
+    artifacts = ArtifactRefs(
+        script_path=_existing_path("script.js"),
+        results_json_path=_existing_path("results.json"),
+        stdout_log_path=_existing_path("stdout.log"),
+        stderr_log_path=_existing_path("stderr.log"),
+    )
+
+    return result.model_copy(
+        update={
+            "target_base_url": run_record.target_base_url,
+            "plan": plan,
+            "artifacts": artifacts,
+        }
+    )

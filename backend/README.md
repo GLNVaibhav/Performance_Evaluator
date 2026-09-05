@@ -52,6 +52,12 @@ curl http://127.0.0.1:8000/api/v1/runs/<run_id>/result
 e-commerce API, once it exists). `demo_plans/` holds hardcoded TestPlans
 for Phase 1 -- no LLM planner dependency yet.
 
+`POST /api/v1/intents/compile` additively accepts a higher-level
+`UniversalPerformanceIntent` (what a user wants, possibly incomplete) and
+deterministically compiles it into a `TestPlan`, or returns a structured
+`NEEDS_CLARIFICATION`/`INVALID` result -- it never executes anything. See
+`docs/ai_intent_architecture.md`.
+
 ## Test
 
 ```
@@ -100,3 +106,8 @@ metrics come back. This exercises real k6 execution, not a mock.
   out of scope.
 - No LLM planner, no adaptive boundary-search engine, no auth, no
   frontend, no OpenAPI parser. Not in scope for this chunk.
+- `app/schemas/intent.py` + `app/services/intent_compiler.py` add a
+  deterministic `UniversalPerformanceIntent -> TestPlan` compiler
+  (`POST /api/v1/intents/compile`) so a future AI/NLP layer has a safe,
+  validated target to compile into. No AI/LLM provider is integrated by
+  this -- see `docs/ai_intent_architecture.md`.
