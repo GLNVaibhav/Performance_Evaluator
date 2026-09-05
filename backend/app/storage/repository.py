@@ -50,6 +50,18 @@ def get_run(db: Session, run_id: str) -> Optional[TestRunRecord]:
     return db.get(TestRunRecord, run_id)
 
 
+def list_runs(db: Session, limit: int = 20) -> List[TestRunRecord]:
+    """Most-recent-first run history. Read-only, additive -- does not
+    touch the run lifecycle (create_run/mark_run_*) or any protected
+    execution-core boundary."""
+    return (
+        db.query(TestRunRecord)
+        .order_by(TestRunRecord.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
 def mark_run_running(db: Session, run_id: str) -> None:
     run = db.get(TestRunRecord, run_id)
     if run is None:

@@ -31,6 +31,13 @@ execution timeout are also env-configurable:
 Defaults are sized for local/staging/sandbox use on a single developer
 machine, not production load testing.
 
+`POST /api/v1/intents/interpret` (real LLM, `app/services/llm_intent_interpreter.py`)
+needs `LLM_API_KEY` set to call a real OpenAI-compatible provider -- see
+`.env.example` and `docs/llm_intent_interpreter_notes.md`. Without a key,
+every call fails fast and safely to `INTERPRETATION_FAILURE`; it never
+crashes the backend and `POST /api/v1/intents/compile` is entirely
+unaffected either way.
+
 ## Run
 
 ```

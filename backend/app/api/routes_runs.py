@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ from app.schemas.run import RunCreateRequest, RunCreateResponse, RunStatusRespon
 from app.schemas.test_result import ArtifactRefs, TestResult
 from app.services import run_service
 from app.services.engine_provider import get_performance_engine
+from app.services.target_validation import TargetValidationError
 from app.services.workload_limits import WorkloadLimitExceededError
 from app.storage import repository
 
@@ -28,9 +29,32 @@ def create_run(
         raise HTTPException(status_code=404, detail=str(exc))
     except WorkloadLimitExceededError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except TargetValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
     background_tasks.add_task(run_service.execute_run, run_record.id, get_performance_engine())
     return RunCreateResponse(run_id=run_record.id, status=RunState(run_record.state))
+
+
+@router.get("", response_model=List[RunStatusResponse])
+def list_runs(limit: int = 20, db: Session = Depends(get_db)) -> List[RunStatusResponse]:
+    """Most-recent-first run history -- read-only, additive. Does not
+    touch run_service, the execution lifecycle, or any protected
+    boundary; reuses the exact same RunStatusResponse shape GET
+    /runs/{run_id} already returns."""
+    limit = max(1, min(limit, 100))
+    records = repository.list_runs(db, limit=limit)
+    return [
+        RunStatusResponse(
+            run_id=r.id,
+            status=RunState(r.state),
+            created_at=r.created_at,
+            started_at=r.started_at,
+            finished_at=r.finished_at,
+            error_message=r.error_message,
+        )
+        for r in records
+    ]
 
 
 @router.get("/{run_id}", response_model=RunStatusResponse)

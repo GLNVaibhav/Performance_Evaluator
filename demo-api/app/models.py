@@ -23,6 +23,16 @@ class ProductListResponse(BaseModel):
     products: List[Product]
 
 
+class Category(BaseModel):
+    id: int
+    name: str
+    description: str
+
+
+class CategoryListResponse(BaseModel):
+    categories: List[Category]
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -41,6 +51,17 @@ class CartItem(BaseModel):
 
 
 class CartRequest(BaseModel):
+    # Deliberately kept single-item / flat-field (product_id, quantity),
+    # NOT items: List[CartItemRequest]. A nested-model list was tried
+    # during this expansion and empirically failed real k6 execution: the
+    # Performance Evaluator's payload_generator.py does not resolve a
+    # $ref that appears NESTED inside a schema (e.g. an array's `items`
+    # pointing at another component schema) -- only the top-level request
+    # body $ref is resolved (app/services/k6_engine/openapi_loader.py).
+    # This is a genuine, proven engine limitation, not a demo-api design
+    # choice -- see backend/docs/target_api_notes.md for the full finding,
+    # root cause, and proposed minimal fix. Reverted here rather than
+    # patching protected execution-core code without explicit approval.
     product_id: int
     quantity: PositiveInt = 1
 

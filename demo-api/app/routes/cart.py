@@ -37,5 +37,9 @@ async def add_to_cart(payload: CartRequest) -> CartResponse:
         unit_price=product.price,
         name=product.name,
     )
+    # A fresh, uniquely-IDed cart per call (see app/state.py: create_cart
+    # generates a new uuid4 cart_id and stores it under a lock) is how
+    # concurrent, independent callers stay isolated from each other today
+    # -- there is no shared/global cart.
     cart = create_cart([item])
     return CartResponse(cart_id=cart.cart_id, items=cart.items, total=cart.total)
