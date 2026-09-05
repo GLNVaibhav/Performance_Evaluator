@@ -1,6 +1,6 @@
-from typing import Annotated, List, Literal, Union
+from typing import Annotated, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, PositiveInt, field_validator
+from pydantic import BaseModel, Field, PositiveInt, field_validator, model_validator
 
 from app.schemas.enums import ObjectiveType, TestType
 
@@ -19,6 +19,15 @@ class _PlanBase(BaseModel):
     test_type: TestType
     thresholds: Thresholds
     selected_endpoints: List[str] = Field(min_length=1)
+    # Additive amendment (endpoint mix, local/pending gate review -- see
+    # docs/performance_engine_interface.md "Amendment: endpoint mix +
+    # per-endpoint evidence"). Optional and backward compatible: omitting
+    # it (the only option before this amendment) preserves the original
+    # uniform-random dispatch across selected_endpoints unchanged. When
+    # given, every selected_endpoints entry must have exactly one weight
+    # (no more, no less) so there is never an implicit/ambiguous weight for
+    # an endpoint the plan explicitly selected.
+    endpoint_weights: Optional[Dict[str, float]] = None
     assumptions: List[str] = Field(default_factory=list)
     target_vus: PositiveInt
 
@@ -28,6 +37,32 @@ class _PlanBase(BaseModel):
         if any(not e.strip() for e in v):
             raise ValueError("selected_endpoints entries must be non-empty")
         return v
+
+    @model_validator(mode="after")
+    def _validate_endpoint_weights(self) -> "_PlanBase":
+        if self.endpoint_weights is None:
+            return self
+
+        selected = set(self.selected_endpoints)
+        weighted = set(self.endpoint_weights.keys())
+        if weighted != selected:
+            problems = []
+            missing = selected - weighted
+            extra = weighted - selected
+            if missing:
+                problems.append(f"missing weight for {sorted(missing)}")
+            if extra:
+                problems.append(f"weight given for unselected endpoint(s) {sorted(extra)}")
+            raise ValueError(
+                "endpoint_weights must cover exactly selected_endpoints, no more and no less: "
+                + "; ".join(problems)
+            )
+
+        non_positive = {e: w for e, w in self.endpoint_weights.items() if not w > 0}
+        if non_positive:
+            raise ValueError(f"endpoint_weights must be > 0, got non-positive weight(s): {non_positive}")
+
+        return self
 
 
 def _duration_field() -> Field:

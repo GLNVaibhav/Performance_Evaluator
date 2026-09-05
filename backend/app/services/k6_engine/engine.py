@@ -24,8 +24,8 @@ from app.services.k6_engine.k6_runner import run_k6
 from app.services.k6_engine.metrics_parser import MetricsParseError, parse_results
 from app.services.k6_engine.openapi_loader import OpenAPILoadError, load_normalized
 from app.services.k6_engine.payload_generator import UnsupportedSchemaError
-from app.services.k6_engine.script_renderer import render_script
-from app.services.k6_engine.threshold_evaluator import evaluate_threshold
+from app.services.k6_engine.script_renderer import build_endpoint_tags, render_script
+from app.services.k6_engine.threshold_evaluator import evaluate_threshold, localize_failures
 
 # Every failure mode above this line that means "the plan could not even
 # be turned into a runnable script" collapses to one execution-failure
@@ -47,6 +47,7 @@ class RealK6PerformanceEngine:
         try:
             spec = load_normalized(target.base_url)
             script = render_script(plan, target, spec)
+            endpoint_tags = build_endpoint_tags(plan, spec)
         except _PRE_EXECUTION_ERRORS as exc:
             finished_at = datetime.now(timezone.utc)
             return EngineExecutionOutcome(
@@ -90,7 +91,7 @@ class RealK6PerformanceEngine:
             )
 
         try:
-            metrics = parse_results(outcome.results_path, duration_s)
+            metrics = parse_results(outcome.results_path, duration_s, endpoint_tags)
         except MetricsParseError as exc:
             return EngineExecutionOutcome(
                 exit_code=outcome.exit_code,
@@ -103,12 +104,14 @@ class RealK6PerformanceEngine:
             )
 
         threshold_status = evaluate_threshold(metrics, plan)
+        threshold_violations = localize_failures(metrics, plan)
 
         return EngineExecutionOutcome(
             exit_code=outcome.exit_code,
             summary_exists=True,
             metrics=metrics,
             threshold_status=threshold_status,
+            threshold_violations=threshold_violations,
             raw_output_path=None,  # NDJSON not part of the MVP contract (section 4)
             summary_path=str(outcome.results_path),
             stdout_log_path=str(outcome.stdout_path),

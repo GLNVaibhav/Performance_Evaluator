@@ -1,13 +1,13 @@
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
 from app.schemas.enums import RunState
 from app.schemas.test_plan import TestPlan
-from app.schemas.test_result import MetricsSummary, TestResult
+from app.schemas.test_result import EndpointMetrics, MetricsSummary, TestResult, ThresholdViolation
 from app.storage.models import TestPlanRecord, TestResultRecord, TestRunRecord
 
 
@@ -78,7 +78,13 @@ def mark_run_execution_error(db: Session, run_id: str, error_message: str) -> No
     db.commit()
 
 
-def save_result(db: Session, run_id: str, metrics: MetricsSummary, threshold_status) -> TestResultRecord:
+def save_result(
+    db: Session,
+    run_id: str,
+    metrics: MetricsSummary,
+    threshold_status,
+    threshold_violations: Optional[List[ThresholdViolation]] = None,
+) -> TestResultRecord:
     record = TestResultRecord(
         id=new_id(),
         run_id=run_id,
@@ -93,6 +99,12 @@ def save_result(db: Session, run_id: str, metrics: MetricsSummary, threshold_sta
         error_rate=metrics.error_rate,
         duration_s=metrics.duration_s,
         threshold_status=threshold_status.value,
+        per_endpoint_json=(
+            json.dumps([e.model_dump() for e in metrics.per_endpoint]) if metrics.per_endpoint else None
+        ),
+        threshold_violations_json=(
+            json.dumps([v.model_dump() for v in threshold_violations]) if threshold_violations else None
+        ),
     )
     db.add(record)
     db.commit()
@@ -111,6 +123,14 @@ def load_plan_model(record: TestPlanRecord) -> TestPlan:
 
 
 def result_record_to_schema(record: TestResultRecord) -> TestResult:
+    per_endpoint = (
+        [EndpointMetrics(**e) for e in json.loads(record.per_endpoint_json)] if record.per_endpoint_json else []
+    )
+    threshold_violations = (
+        [ThresholdViolation(**v) for v in json.loads(record.threshold_violations_json)]
+        if record.threshold_violations_json
+        else []
+    )
     return TestResult(
         run_id=record.run_id,
         metrics=MetricsSummary(
@@ -124,7 +144,9 @@ def result_record_to_schema(record: TestResultRecord) -> TestResult:
             failed_requests=record.failed_requests,
             error_rate=record.error_rate,
             duration_s=record.duration_s,
+            per_endpoint=per_endpoint,
         ),
         threshold_status=record.threshold_status,
         evaluated_at=record.evaluated_at,
+        threshold_violations=threshold_violations,
     )

@@ -55,3 +55,10 @@ class TestResultRecord(Base):
     duration_s: Mapped[float] = mapped_column(Float, nullable=False)
     threshold_status: Mapped[str] = mapped_column(String, nullable=False)
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Additive (endpoint mix + per-endpoint evidence amendment): JSON-serialized
+    # list of EndpointMetrics dicts, same pattern as TestPlanRecord.plan_json.
+    # Nullable so it never breaks reading a row written before this column
+    # existed on a persisted (non-fresh) database.
+    per_endpoint_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Additive, same pattern/rationale as per_endpoint_json above.
+    threshold_violations_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)
