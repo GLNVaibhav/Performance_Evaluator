@@ -13,6 +13,7 @@ from app.schemas.enums import RunState
 from app.schemas.run import RunCreateRequest
 from app.schemas.test_plan import TargetConfig, TestPlan
 from app.services.performance_engine import PerformanceEngine
+from app.services.target_validation import validate_target_compatibility
 from app.services.workload_limits import validate_workload_limits
 from app.storage import repository
 from app.storage.db import SessionLocal
@@ -45,7 +46,16 @@ def create_run(db: Session, request: RunCreateRequest) -> TestRunRecord:
 
     # Authoritative workload safety gate. Runs for every plan source
     # (inline or hardcoded) before anything is persisted or reaches k6.
+    # Cheap and local -- checked before the network-dependent target gate
+    # below.
     validate_workload_limits(plan)
+
+    # Target-compatibility gate (see app/services/target_validation.py for
+    # the full rationale): only rejects when the target was reachable and
+    # demonstrably lacks a selected endpoint. An unreachable target is not
+    # rejected here -- deferred to execute_run, unchanged from before this
+    # gate existed.
+    validate_target_compatibility(plan, request.target)
 
     plan_record = repository.save_plan(db, plan)
     artifact_dir = ARTIFACTS_DIR / "pending"  # replaced below once run id exists

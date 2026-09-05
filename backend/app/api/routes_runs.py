@@ -10,6 +10,7 @@ from app.schemas.run import RunCreateRequest, RunCreateResponse, RunStatusRespon
 from app.schemas.test_result import ArtifactRefs, TestResult
 from app.services import run_service
 from app.services.engine_provider import get_performance_engine
+from app.services.target_validation import TargetValidationError
 from app.services.workload_limits import WorkloadLimitExceededError
 from app.storage import repository
 
@@ -27,6 +28,8 @@ def create_run(
     except run_service.PlanNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except WorkloadLimitExceededError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except TargetValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
     background_tasks.add_task(run_service.execute_run, run_record.id, get_performance_engine())
