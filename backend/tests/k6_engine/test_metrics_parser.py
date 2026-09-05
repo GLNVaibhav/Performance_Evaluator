@@ -1,8 +1,10 @@
+import json
 from pathlib import Path
 
 import pytest
 
 from app.services.k6_engine.metrics_parser import MetricsParseError, parse_results
+from app.services.k6_engine.script_renderer import EndpointTagInfo
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -61,3 +63,97 @@ def test_nested_values_layout_also_supported():
         assert metrics.total_requests == 115
     finally:
         nested_path.unlink()
+
+
+# --- Per-endpoint breakdown (endpoint mix + per-endpoint evidence) --------
+
+_DURATION_STATS = {"p(50)": 10.0, "p(95)": 20.0, "p(99)": 30.0, "avg": 12.0, "max": 40.0}
+
+
+def _multi_endpoint_results(tmp_path: Path) -> Path:
+    """Two distinctly-different tagged endpoints in one results.json, to
+    prove metrics_parser doesn't cross-contaminate them."""
+    data = {
+        "metrics": {
+            "http_req_duration": _DURATION_STATS,
+            "http_reqs": {"count": 180, "rate": 22.5},
+            "http_req_failed": {"value": 0.1},
+            "http_req_duration{endpoint:endpoint_0}": {
+                "p(50)": 5.0, "p(95)": 10.0, "p(99)": 15.0, "avg": 6.0, "max": 20.0,
+            },
+            "http_reqs{endpoint:endpoint_0}": {"count": 120, "rate": 15.0},
+            "http_req_failed{endpoint:endpoint_0}": {"passes": 6, "fails": 114, "value": 0.05},
+            "http_req_duration{endpoint:endpoint_1}": {
+                "p(50)": 50.0, "p(95)": 4200.0, "p(99)": 5000.0, "avg": 2000.0, "max": 6000.0,
+            },
+            "http_reqs{endpoint:endpoint_1}": {"count": 60, "rate": 7.5},
+            "http_req_failed{endpoint:endpoint_1}": {"passes": 30, "fails": 30, "value": 0.5},
+        }
+    }
+    path = tmp_path / "results.json"
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_multiple_tagged_endpoints_are_parsed_and_kept_separate(tmp_path):
+    tags = [
+        EndpointTagInfo(alias="endpoint_0", endpoint="/products", method="GET"),
+        EndpointTagInfo(alias="endpoint_1", endpoint="/checkout", method="POST"),
+    ]
+    metrics = parse_results(_multi_endpoint_results(tmp_path), duration_s=8.0, endpoint_tags=tags)
+
+    assert len(metrics.per_endpoint) == 2
+    products = next(e for e in metrics.per_endpoint if e.endpoint == "/products")
+    checkout = next(e for e in metrics.per_endpoint if e.endpoint == "/checkout")
+
+    # Each endpoint's own numbers, not swapped or averaged together.
+    assert products.total_requests == 120
+    assert products.p95_ms == 10.0
+    assert products.error_rate == 0.05
+    assert products.failed_requests == 6  # from "passes", not "fails" (114)
+
+    assert checkout.total_requests == 60
+    assert checkout.p95_ms == 4200.0
+    assert checkout.error_rate == 0.5
+    assert checkout.failed_requests == 30
+
+    # Per-endpoint parsing never touches (or corrupts) the aggregate.
+    assert metrics.total_requests == 180
+    assert metrics.error_rate == 0.1
+
+
+def test_endpoint_with_no_recorded_requests_is_omitted_not_fabricated(tmp_path):
+    """A configured endpoint that received zero traffic in this run (e.g.
+    a very short run with a very small weight) must not appear with
+    fabricated zero metrics -- it's simply absent, per module docstring."""
+    tags = [
+        EndpointTagInfo(alias="endpoint_0", endpoint="/products", method="GET"),
+        EndpointTagInfo(alias="endpoint_2", endpoint="/rarely_hit", method="GET"),
+    ]
+    metrics = parse_results(_multi_endpoint_results(tmp_path), duration_s=8.0, endpoint_tags=tags)
+
+    endpoints_seen = {e.endpoint for e in metrics.per_endpoint}
+    assert "/products" in endpoints_seen
+    assert "/rarely_hit" not in endpoints_seen
+
+
+def test_malformed_single_endpoint_tag_does_not_fail_the_whole_run(tmp_path):
+    """Per-endpoint enrichment is best-effort: garbage in the tagged
+    submetric must not raise MetricsParseError for the whole (otherwise
+    valid) run."""
+    data = {
+        "metrics": {
+            "http_req_duration": _DURATION_STATS,
+            "http_reqs": {"count": 10, "rate": 1.25},
+            "http_req_failed": {"value": 0.0},
+            "http_req_duration{endpoint:endpoint_0}": "not-a-dict",
+            "http_reqs{endpoint:endpoint_0}": {"count": 10, "rate": 1.25},
+            "http_req_failed{endpoint:endpoint_0}": {"value": 0.0},
+        }
+    }
+    path = tmp_path / "results.json"
+    path.write_text(json.dumps(data))
+
+    metrics = parse_results(path, duration_s=8.0, endpoint_tags=[EndpointTagInfo("endpoint_0", "/broken", "GET")])
+    assert metrics.per_endpoint == []
+    assert metrics.total_requests == 10  # aggregate is unaffected
