@@ -53,6 +53,7 @@ DELIBERATE ASYMMETRY -- read before changing this file:
 from __future__ import annotations
 
 from app.schemas.test_plan import TargetConfig, TestPlan
+from app.services.auth_headers import build_auth_headers
 from app.services.k6_engine.endpoint_resolver import ResolutionError, resolve_selected_endpoints
 from app.services.k6_engine.openapi_loader import OpenAPILoadError, load_normalized
 
@@ -76,7 +77,11 @@ def validate_target_compatibility(plan: TestPlan, target: TargetConfig) -> None:
     and is allowed to propagate.
     """
     try:
-        spec = load_normalized(target.base_url)
+        spec = load_normalized(
+            target.base_url,
+            openapi_url=target.openapi_url,
+            headers=build_auth_headers(target.auth),
+        )
     except OpenAPILoadError:
         return  # cannot verify right now -- defer to execute_run, unchanged
 

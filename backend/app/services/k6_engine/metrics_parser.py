@@ -8,6 +8,30 @@ layout has varied across k6 versions -- see performance_engine_interface.md.
 Missing required metrics is an execution failure, not a metric silently
 returned as zero (section 15, section 5).
 
+--- p75/p90 (Session 5, additive) -----------------------------------------
+
+Optional, unlike p50/p95/p99: a `results.json` produced before
+k6_runner.py's `_SUMMARY_TREND_STATS` included them (an old artifact, or a
+future engine that renders it differently) simply lacks the `p(75)`/`p(90)`
+keys -- absence means "not collected for this run", left as `None`, NEVER
+backfilled from a guess or interpolated from the percentiles that ARE
+present (section 15's "never a metric silently returned as [invented]"
+applies just as much to a missing optional stat as a missing required
+one).
+
+--- HTTP status-code evidence (Session 5, additive) ------------------------
+
+See app/services/k6_engine/script_renderer.py's module docstring for the
+full mechanism (a dynamically-named `check()` per observed status, e.g.
+`http_status_200`) and why it was chosen: k6's `--summary-export` has no
+native per-status breakdown, and `root_group.checks` is the smallest
+existing structure that already reports unconditionally. `_extract_status_codes()`
+below reads ONLY keys matching `^http_status_(\\d+)$` -- never confused
+with the pre-existing, unrelated check names ("status is not zero
+(request completed)", "checkout: got a response") this script has always
+emitted. Absent (old `results.json`, or a script that predates this
+amendment) -> `{}`, never fabricated.
+
 --- Per-endpoint breakdown (additive amendment) --------------------------
 
 `endpoint_tags` (optional, from script_renderer.build_endpoint_tags()) maps
@@ -29,8 +53,9 @@ AGGREGATE result and is completely unaffected by per-endpoint enrichment).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from app.schemas.test_result import EndpointMetrics, MetricsSummary
 from app.services.k6_engine.script_renderer import EndpointTagInfo
@@ -55,6 +80,31 @@ def _optional_stat(stats: dict, *keys: str):
         if key in stats:
             return stats[key]
     return None
+
+
+_HTTP_STATUS_CHECK_RE = re.compile(r"^http_status_(\d+)$")
+
+
+def _extract_status_codes(data: dict) -> Dict[str, int]:
+    """Reads app/services/k6_engine/script_renderer.py's dynamically-named
+    `http_status_<code>` checks out of `root_group.checks`. Only status
+    codes ACTUALLY OBSERVED appear -- never a hardcoded/guessed list, and
+    never present at all for a results.json that predates this mechanism
+    (returns `{}`, not an error: this is enrichment, not a required
+    metric -- see module docstring)."""
+    checks = data.get("root_group", {}).get("checks", {})
+    if not isinstance(checks, dict):
+        return {}
+
+    status_codes: Dict[str, int] = {}
+    for name, check_data in checks.items():
+        match = _HTTP_STATUS_CHECK_RE.match(name)
+        if not match or not isinstance(check_data, dict):
+            continue
+        passes = check_data.get("passes")
+        if isinstance(passes, int) and passes > 0:
+            status_codes[match.group(1)] = passes
+    return status_codes
 
 
 def _parse_one_endpoint(metrics: dict, duration_s: float, tag: EndpointTagInfo) -> Optional[EndpointMetrics]:
@@ -162,14 +212,26 @@ def parse_results(
     average_ms = _require(duration_stats, "avg", metric_name="http_req_duration")
     max_ms = _require(duration_stats, "max", metric_name="http_req_duration")
 
+    # Optional (Session 5): absent entirely for a results.json predating
+    # k6_runner.py's expanded --summary-trend-stats -- left None, never
+    # backfilled/estimated from p50/p95/p99.
+    p75_raw = _optional_stat(duration_stats, "p(75)")
+    p90_raw = _optional_stat(duration_stats, "p(90)")
+    p75_ms = float(p75_raw) if p75_raw is not None else None
+    p90_ms = float(p90_raw) if p90_raw is not None else None
+
     total_requests = int(_require(reqs_stats, "count", metric_name="http_reqs"))
     rps = _require(reqs_stats, "rate", metric_name="http_reqs")
 
     error_rate = _require(failed_stats, "value", "rate", metric_name="http_req_failed")
     failed_requests = round(error_rate * total_requests)
 
+    status_codes = _extract_status_codes(data)
+
     return MetricsSummary(
         p50_ms=p50_ms,
+        p75_ms=p75_ms,
+        p90_ms=p90_ms,
         p95_ms=p95_ms,
         p99_ms=p99_ms,
         average_ms=average_ms,
@@ -179,5 +241,6 @@ def parse_results(
         failed_requests=failed_requests,
         error_rate=error_rate,
         duration_s=duration_s,
+        status_codes=status_codes,
         per_endpoint=_parse_per_endpoint(metrics, duration_s, endpoint_tags),
     )

@@ -61,3 +61,78 @@ LLM_KNOWN_ENDPOINTS = [
 ]
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# SSRF policy for user-supplied target/OpenAPI URLs (app/services/
+# target_url_safety.py). "allow_private" (default) permits loopback/
+# private-network hosts -- required for this project's own local/demo
+# workflow (the canonical demo API runs at 127.0.0.1, and the documented
+# MVP scope is "local/staging/sandbox only", never production -- see
+# docs/performance_engine_interface.md). "block_private" additionally
+# rejects loopback/private/link-local hosts, for a deployment where the
+# backend itself is reachable from outside and a stricter policy is
+# wanted. Cloud-metadata / link-local addresses (169.254.0.0/16, incl. the
+# common 169.254.169.254 metadata IP, and Alibaba Cloud's
+# 100.100.100.200) are ALWAYS blocked regardless of this setting -- there
+# is no legitimate performance-test target in that range.
+TARGET_SSRF_POLICY = os.environ.get("TARGET_SSRF_POLICY", "allow_private")
+
+# Cap on a fetched OpenAPI document's size (app/services/k6_engine/
+# openapi_loader.py). Hackathon-grade, not a true streaming cap (httpx.get
+# already fully downloads the response before this check runs) -- see
+# that module's docstring for the accepted tradeoff.
+MAX_OPENAPI_DOC_BYTES = int(os.environ.get("MAX_OPENAPI_DOC_BYTES", str(5 * 1024 * 1024)))  # 5 MiB
+
+# --- Payload generation safety (Session 3) ---------------------------------
+# app/services/k6_engine/payload_generator.py. Since Session 1 opened
+# OpenAPI *discovery* to an arbitrary user-supplied URL, a schema is no
+# longer necessarily authored by this project's own team -- these bound
+# what a maliciously or accidentally pathological schema (deeply nested
+# inline objects/arrays, no $ref cycle needed) can make the generator do.
+# Not workload limits (those are app/services/workload_limits.py, about
+# VUs/duration) -- these are about the SHAPE of one generated request body.
+
+# Recursion depth ceiling while walking a request-body schema tree
+# (properties / array items nested arbitrarily). Comfortably above any
+# realistic real-world schema (the canonical demo API's deepest schema is
+# 2 levels) while still bounding a pathological/adversarial one.
+MAX_PAYLOAD_DEPTH = int(os.environ.get("MAX_PAYLOAD_DEPTH", "12"))
+
+# Max number of items generated for one array field, regardless of the
+# schema's own `maxItems` (a schema-declared `minItems` is still honored,
+# capped at this ceiling).
+MAX_PAYLOAD_ARRAY_ITEMS = int(os.environ.get("MAX_PAYLOAD_ARRAY_ITEMS", "20"))
+
+# Max serialized (JSON) size of one generated request body.
+MAX_PAYLOAD_BODY_BYTES = int(os.environ.get("MAX_PAYLOAD_BODY_BYTES", str(64 * 1024)))  # 64 KiB
+
+# Same depth ceiling, applied independently inside app/services/k6_engine/
+# openapi_loader.py's nested-$ref resolution pass (Session 3) -- bounds a
+# very long (but acyclic) $ref chain in a user-supplied OpenAPI document.
+# A *cyclic* $ref chain (a legitimate recursive-type shape, e.g. a
+# tree/linked-list schema) is separately detected and never expanded more
+# than once, regardless of this constant.
+MAX_REF_RESOLUTION_DEPTH = int(os.environ.get("MAX_REF_RESOLUTION_DEPTH", "20"))
+
+# Browser-facing CORS allow-list (app/main.py). The frontend
+# (clone/performance-evaluator-frontend) runs on a different origin
+# (Vite's dev server, http://localhost:5173 by default) than this backend
+# (http://127.0.0.1:8000) -- without an explicit allow-list, a browser
+# blocks the cross-origin request at the CORS preflight stage (confirmed:
+# `OPTIONS .../intents/interpret` with a real `Origin` header returned
+# `405` with no `Access-Control-*` headers before this was added), which
+# surfaces in the frontend as a generic "network error contacting
+# backend" -- indistinguishable, from the browser's own error, from an
+# actual unreachable server. Explicit origins only, never `"*"` (this
+# project's own convention throughout -- e.g. TARGET_SSRF_POLICY,
+# LLM_KNOWN_ENDPOINTS -- is "explicit allow-list, env-configurable,
+# never a wildcard"). `127.0.0.1` and `localhost` are listed separately
+# because browsers treat them as distinct origins even though they
+# resolve to the same host.
+CORS_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if o.strip()
+]

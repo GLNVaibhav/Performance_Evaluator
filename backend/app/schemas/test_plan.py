@@ -1,8 +1,10 @@
+import re
 from typing import Annotated, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, PositiveInt, field_validator, model_validator
 
-from app.schemas.enums import ObjectiveType, TestType
+from app.schemas.auth import AuthConfig
+from app.schemas.enums import ObjectiveType, PayloadStrategy, TestType
 
 # k6-style duration string, e.g. "5s", "20s", "2m". This is a plain config
 # value, never JavaScript, and never LLM-authored. The renderer (owned by
@@ -28,6 +30,12 @@ class _PlanBase(BaseModel):
     # (no more, no less) so there is never an implicit/ambiguous weight for
     # an endpoint the plan explicitly selected.
     endpoint_weights: Optional[Dict[str, float]] = None
+    # Additive (Session 3): selects among app/services/k6_engine/
+    # payload_generator.py's two fixed, deterministic generation rules.
+    # Defaulting to `normal` reproduces the exact pre-existing behavior for
+    # every plan constructed before this field existed -- omitting it is
+    # indistinguishable from explicitly requesting `normal`.
+    payload_strategy: PayloadStrategy = PayloadStrategy.normal
     assumptions: List[str] = Field(default_factory=list)
     target_vus: PositiveInt
 
@@ -90,8 +98,75 @@ TestPlan = Annotated[
 ]
 
 
+_URL_SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
+_EMBEDDED_CREDENTIALS_RE = re.compile(r"^https?://[^/]*@", re.IGNORECASE)
+
+
+def _validate_url_scheme(value: str, *, field_name: str) -> str:
+    """Deliberately lenient -- checks only that the value is a non-empty
+    string starting with an http(s) scheme and does not embed credentials
+    in the URL itself (`user:pass@host`, a classic secret-leak vector: it
+    ends up in access logs, browser history, and Referer headers).
+
+    This is NOT a general URL/RFC validator, and specifically does NOT
+    attempt full parsing (scheme+host extraction, IDNA, etc.) -- see
+    tests/k6_engine/test_script_renderer_injection.py, which deliberately
+    constructs `TargetConfig(base_url=<adversarial-but-http-prefixed
+    string>)` to prove the k6 script renderer's encoding-based injection
+    defense (json.dumps-equivalent string literals, never JS syntax). A
+    stricter validator here (e.g. requiring a parseable hostname) would
+    reject those payloads at schema-construction time, defeating that test
+    suite's purpose without making the system any safer -- the renderer's
+    encoding is what actually neutralizes such payloads, not rejecting
+    them at the door. Network-reachability / private-address (SSRF)
+    checks are a separate, later gate (app/services/target_url_safety.py),
+    not schema validation, since they require DNS resolution (I/O)."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+    if not _URL_SCHEME_RE.match(value):
+        raise ValueError(f"{field_name} must start with 'http://' or 'https://'")
+    if _EMBEDDED_CREDENTIALS_RE.match(value):
+        raise ValueError(f"{field_name} must not embed credentials in the URL itself (user:pass@host)")
+    return value
+
+
 class TargetConfig(BaseModel):
-    """Where the plan's endpoints are resolved against. Auth is deliberately
-    out of scope for Phase 1 (no target requires it yet)."""
+    """Where the plan's endpoints are resolved against.
+
+    `openapi_url` (optional): explicit location of the target's OpenAPI
+    document, for a target whose spec is not served at
+    `{base_url}/openapi.json` (the sole assumption `openapi_loader.py`
+    made before this field existed). Omitting it preserves the original
+    derivation exactly -- see app/services/k6_engine/openapi_loader.py::
+    load_normalized(). Deliberately independent of `base_url`: the OpenAPI
+    document can be discovered from a different host (e.g. a docs
+    subdomain) than the one real test traffic is sent to. The system never
+    infers one from the other, and never silently substitutes one host for
+    the other -- see docs/target_auth_contract.md.
+
+    `auth` (optional): real credential material (app/schemas/auth.py::
+    AuthConfig) used ONLY to authenticate the backend's own OpenAPI
+    discovery fetch (app/services/auth_headers.py::build_auth_headers()).
+    It is never persisted to the database (app/services/
+    target_context_store.py holds it in-memory, per-run, for the lifetime
+    of that run only) and never reaches the LLM/intent layer -- see
+    app/schemas/auth.py::sanitize_auth(). The generated k6 script does NOT
+    currently receive it (script_renderer.py is unmodified by this work);
+    see docs/target_auth_contract.md for that explicit, documented scope
+    decision."""
 
     base_url: str
+    openapi_url: Optional[str] = None
+    auth: Optional[AuthConfig] = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str) -> str:
+        return _validate_url_scheme(v, field_name="target.base_url")
+
+    @field_validator("openapi_url")
+    @classmethod
+    def _validate_openapi_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _validate_url_scheme(v, field_name="target.openapi_url")

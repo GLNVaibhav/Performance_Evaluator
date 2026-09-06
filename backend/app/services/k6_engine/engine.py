@@ -19,6 +19,7 @@ from pathlib import Path
 from app.core.config import K6_BINARY, K6_EXECUTION_TIMEOUT_S
 from app.schemas.test_plan import TargetConfig, TestPlan
 from app.schemas.test_result import EngineExecutionOutcome
+from app.services.auth_headers import build_auth_env, build_auth_headers
 from app.services.k6_engine.endpoint_resolver import ResolutionError
 from app.services.k6_engine.k6_runner import run_k6
 from app.services.k6_engine.metrics_parser import MetricsParseError, parse_results
@@ -26,6 +27,8 @@ from app.services.k6_engine.openapi_loader import OpenAPILoadError, load_normali
 from app.services.k6_engine.payload_generator import UnsupportedSchemaError
 from app.services.k6_engine.script_renderer import build_endpoint_tags, render_script
 from app.services.k6_engine.threshold_evaluator import evaluate_threshold, localize_failures
+from app.services.secret_redaction import redact_secrets
+from app.services.target_auth_secrets import auth_secret_values
 
 # Every failure mode above this line that means "the plan could not even
 # be turned into a runnable script" collapses to one execution-failure
@@ -45,11 +48,21 @@ class RealK6PerformanceEngine:
         artifact_directory.mkdir(parents=True, exist_ok=True)
 
         try:
-            spec = load_normalized(target.base_url)
+            spec = load_normalized(
+                target.base_url,
+                openapi_url=target.openapi_url,
+                headers=build_auth_headers(target.auth),
+            )
             script = render_script(plan, target, spec)
             endpoint_tags = build_endpoint_tags(plan, spec)
         except _PRE_EXECUTION_ERRORS as exc:
             finished_at = datetime.now(timezone.utc)
+            # Defense in depth: `exc` originates from an OpenAPI fetch that
+            # may have carried an auth header (build_auth_headers above).
+            # httpx/JSON-decode exceptions don't echo header values in
+            # practice, but this message is never trusted blindly -- see
+            # app/services/secret_redaction.py's module docstring.
+            message = redact_secrets(f"could not prepare k6 script: {exc}", auth_secret_values(target))
             return EngineExecutionOutcome(
                 exit_code=-1,
                 summary_exists=False,
@@ -57,7 +70,7 @@ class RealK6PerformanceEngine:
                 stderr_log_path=None,
                 started_at=started_at,
                 finished_at=finished_at,
-                error_message=f"could not prepare k6 script: {exc}",
+                error_message=message,
             )
 
         script_path = artifact_directory / "script.js"
@@ -69,6 +82,12 @@ class RealK6PerformanceEngine:
             artifact_directory=artifact_directory,
             k6_binary=K6_BINARY,
             timeout_s=K6_EXECUTION_TIMEOUT_S,
+            # The ONLY place target.auth's real secret reaches the k6
+            # process -- as a subprocess environment variable, never
+            # written into script.js itself. See
+            # app/services/auth_headers.py::build_auth_env() and
+            # docs/target_auth_contract.md.
+            env=build_auth_env(target.auth),
         )
         duration_s = time.monotonic() - wall_start
 

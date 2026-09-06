@@ -44,6 +44,11 @@ class TestResultRecord(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("test_runs.id"), nullable=False, unique=True)
     p50_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    # Additive (Session 5): nullable so a row written before this column
+    # existed reads back fine (None) -- same pattern as per_endpoint_json
+    # below. Absent means "not collected for this run", never backfilled.
+    p75_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    p90_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     p95_ms: Mapped[float] = mapped_column(Float, nullable=False)
     p99_ms: Mapped[float] = mapped_column(Float, nullable=False)
     average_ms: Mapped[float] = mapped_column(Float, nullable=False)
@@ -62,3 +67,7 @@ class TestResultRecord(Base):
     per_endpoint_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     # Additive, same pattern/rationale as per_endpoint_json above.
     threshold_violations_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Additive (Session 5), same pattern/rationale: JSON-serialized
+    # {"200": 950, ...} -- only statuses actually observed. Nullable/empty
+    # for a row written before this column existed.
+    status_codes_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)

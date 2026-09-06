@@ -130,6 +130,20 @@ RULES (follow every one exactly):
      system doesn't support). Set intent to null and explain why in
      reason.
 7. {endpoint_rules}
+8. load_profile has two distinct fields: concurrent_users (a steady/
+   typical load, used by baseline and soak) and peak_users (the ceiling
+   a stress test pushes toward). For test_type "stress" specifically:
+   - If the user states only ONE user/concurrency figure (e.g. "stress
+     checkout with 30 users"), that figure IS the peak being probed --
+     put it in peak_users and leave concurrent_users null. Do not put a
+     stress request's single stated figure in concurrent_users.
+   - Only populate BOTH fields when the wording distinguishes two
+     different figures -- a separate starting/ramp level from a
+     separate target ceiling (e.g. "start with 10 users and stress up
+     to 100 users" -> concurrent_users=10, peak_users=100).
+   This is a classification rule for which field a stated figure
+   belongs in, not license to invent a figure the user never gave --
+   rule 1 still applies in full.
 
 {shape}
 """

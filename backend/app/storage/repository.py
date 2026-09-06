@@ -101,6 +101,8 @@ def save_result(
         id=new_id(),
         run_id=run_id,
         p50_ms=metrics.p50_ms,
+        p75_ms=metrics.p75_ms,
+        p90_ms=metrics.p90_ms,
         p95_ms=metrics.p95_ms,
         p99_ms=metrics.p99_ms,
         average_ms=metrics.average_ms,
@@ -117,6 +119,7 @@ def save_result(
         threshold_violations_json=(
             json.dumps([v.model_dump() for v in threshold_violations]) if threshold_violations else None
         ),
+        status_codes_json=(json.dumps(metrics.status_codes) if metrics.status_codes else None),
     )
     db.add(record)
     db.commit()
@@ -143,10 +146,13 @@ def result_record_to_schema(record: TestResultRecord) -> TestResult:
         if record.threshold_violations_json
         else []
     )
+    status_codes = json.loads(record.status_codes_json) if record.status_codes_json else {}
     return TestResult(
         run_id=record.run_id,
         metrics=MetricsSummary(
             p50_ms=record.p50_ms,
+            p75_ms=record.p75_ms,
+            p90_ms=record.p90_ms,
             p95_ms=record.p95_ms,
             p99_ms=record.p99_ms,
             average_ms=record.average_ms,
@@ -157,6 +163,7 @@ def result_record_to_schema(record: TestResultRecord) -> TestResult:
             error_rate=record.error_rate,
             duration_s=record.duration_s,
             per_endpoint=per_endpoint,
+            status_codes=status_codes,
         ),
         threshold_status=record.threshold_status,
         evaluated_at=record.evaluated_at,

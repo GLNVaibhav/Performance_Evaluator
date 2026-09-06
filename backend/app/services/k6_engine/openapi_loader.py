@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 import httpx
 
+from app.core.config import MAX_OPENAPI_DOC_BYTES, MAX_REF_RESOLUTION_DEPTH
+
 
 class OpenAPILoadError(RuntimeError):
     """Raised for anything that makes the spec unusable: unreachable host,
@@ -52,20 +54,48 @@ class NormalizedOpenAPI:
         return [e for e in self.endpoints if e.path == path]
 
 
-def fetch_openapi(base_url: str, timeout_s: float = 10.0) -> dict:
-    url = base_url.rstrip("/") + "/openapi.json"
+def _fetch_json(url: str, timeout_s: float = 10.0, headers: Optional[dict] = None) -> dict:
+    """Low-level fetch, shared by `fetch_openapi()` (derives the URL from a
+    base_url) and `load_normalized()`'s explicit `openapi_url` override
+    (uses the given URL as-is). `headers` is passed to `httpx.get()` only
+    when truthy, so a no-auth call is byte-for-byte the same call existing
+    tests already monkeypatch (`monkeypatch.setattr(httpx, "get", ...)`
+    with a two-positional-arg fake) -- see
+    tests/k6_engine/test_openapi_loader.py."""
     try:
-        response = httpx.get(url, timeout=timeout_s)
+        response = httpx.get(url, timeout=timeout_s, headers=headers) if headers else httpx.get(
+            url, timeout=timeout_s
+        )
     except httpx.HTTPError as exc:
         raise OpenAPILoadError(f"could not reach {url}: {exc}") from exc
 
     if response.status_code != 200:
         raise OpenAPILoadError(f"{url} returned HTTP {response.status_code}")
 
+    # Hackathon-grade, not a true streaming cap: httpx.get() above already
+    # fully downloaded the response before this check runs, so this bounds
+    # how large a document we go on to parse/hold in memory, not how many
+    # bytes were transferred. A true cap would need httpx.stream() with an
+    # incremental byte-count abort -- not done here because
+    # tests/k6_engine/test_openapi_loader.py monkeypatches httpx.get (not
+    # httpx.stream) directly; switching fetch mechanisms would require
+    # updating that test's mock for no behavioral gain at this project's
+    # scale (single small demo-API-sized documents).
+    if len(response.content) > MAX_OPENAPI_DOC_BYTES:
+        raise OpenAPILoadError(
+            f"{url} response ({len(response.content)} bytes) exceeds the "
+            f"{MAX_OPENAPI_DOC_BYTES}-byte limit for an OpenAPI document"
+        )
+
     try:
         return response.json()
     except ValueError as exc:
         raise OpenAPILoadError(f"{url} did not return valid JSON: {exc}") from exc
+
+
+def fetch_openapi(base_url: str, timeout_s: float = 10.0, headers: Optional[dict] = None) -> dict:
+    url = base_url.rstrip("/") + "/openapi.json"
+    return _fetch_json(url, timeout_s=timeout_s, headers=headers)
 
 
 def _resolve_ref(raw: dict, ref: str) -> dict:
@@ -81,6 +111,42 @@ def _resolve_ref(raw: dict, ref: str) -> dict:
     return node
 
 
+def _deref_tree(raw: dict, node: Any, active_refs: frozenset, depth: int) -> Any:
+    """Recursively resolves EVERY $ref appearing anywhere in `node`'s tree
+    (properties, array items -- nested arbitrarily), not just a schema's
+    own top-level $ref (which is all `_resolve_ref` alone ever handled
+    before Session 3). Closes the documented, proven gap in
+    docs/target_api_notes.md section 6: a nested-model list (`items:
+    {"$ref": ...}` inside an array) previously reached
+    app/services/k6_engine/payload_generator.py unresolved and failed with
+    "no generation rule for schema type: None".
+
+    Cycle-safe: a $ref that would re-enter itself (a legitimate recursive-
+    type shape, e.g. a tree/linked-list schema) is left UNRESOLVED once
+    detected, rather than expanded forever -- payload_generator.py already
+    fails loudly on an unresolved $ref node (no `type` key it recognizes),
+    which is the correct, safe behavior for a schema this system cannot
+    deterministically generate a FINITE payload for. Also bounded by
+    MAX_REF_RESOLUTION_DEPTH regardless of cycle detection, as a defense-
+    in-depth safety net against a very long (but acyclic) $ref chain --
+    OpenAPI documents are now user-supplied (Session 1's OpenAPI URL
+    input), so this loader must never hang or exhaust the Python call
+    stack on an adversarial document."""
+    if depth > MAX_REF_RESOLUTION_DEPTH:
+        return node
+    if isinstance(node, dict):
+        if "$ref" in node:
+            ref = node["$ref"]
+            if ref in active_refs:
+                return node  # cycle detected -- leave unresolved, fails loud downstream
+            resolved = _resolve_ref(raw, ref)
+            return _deref_tree(raw, resolved, active_refs | {ref}, depth + 1)
+        return {key: _deref_tree(raw, value, active_refs, depth + 1) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_deref_tree(raw, item, active_refs, depth + 1) for item in node]
+    return node
+
+
 def _resolve_request_schema(raw: dict, operation: dict) -> Optional[dict]:
     request_body = operation.get("requestBody")
     if not request_body:
@@ -90,9 +156,10 @@ def _resolve_request_schema(raw: dict, operation: dict) -> Optional[dict]:
         .get("application/json", {})
         .get("schema", {})
     )
-    if "$ref" in schema:
-        return _resolve_ref(raw, schema["$ref"])
-    return schema or None
+    if not schema:
+        return None
+    resolved = _deref_tree(raw, schema, frozenset(), 0)
+    return resolved or None
 
 
 def normalize(raw: dict) -> NormalizedOpenAPI:
@@ -133,5 +200,24 @@ def normalize(raw: dict) -> NormalizedOpenAPI:
     return NormalizedOpenAPI(endpoints=endpoints, raw=raw)
 
 
-def load_normalized(base_url: str) -> NormalizedOpenAPI:
-    return normalize(fetch_openapi(base_url))
+def load_normalized(
+    base_url: str,
+    *,
+    openapi_url: Optional[str] = None,
+    headers: Optional[dict] = None,
+) -> NormalizedOpenAPI:
+    """`openapi_url`, when given, is fetched AS-IS (no `/openapi.json`
+    suffix derivation) -- an explicit override for a target whose spec
+    lives somewhere other than `{base_url}/openapi.json`. `headers` (see
+    app/services/auth_headers.py::build_auth_headers()) authenticates the
+    fetch itself; it has no bearing on where the document says real
+    requests should go (`base_url`, entirely separate -- see
+    app/schemas/test_plan.py::TargetConfig's docstring). Omitting both
+    keyword arguments reproduces the exact prior behavior and call
+    signature -- every existing caller (`load_normalized(target.base_url)`)
+    is unaffected."""
+    if openapi_url:
+        raw = _fetch_json(openapi_url, headers=headers)
+    else:
+        raw = fetch_openapi(base_url, headers=headers)
+    return normalize(raw)

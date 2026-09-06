@@ -370,3 +370,116 @@ def test_no_available_endpoints_configured_skips_containment_check():
     interpreter = _interpreter(content, available_endpoints=[])
     result = interpreter.interpret("10 users on /anything")
     assert result.status == InterpretationStatus.COMPLETE
+
+
+# --- Test 10: stress load_profile disambiguation (single figure -> peak) ----
+#
+# Regression coverage for a real observed bug: "Stress checkout with 30
+# users for 8 seconds" reached POST /intents/compile as
+# {test_type: stress, load_profile: {concurrent_users: 30, peak_users: null}},
+# which -- correctly, per app/services/intent_compiler.py's documented,
+# deliberate "never fall back from one load_profile field to the other"
+# policy (see docs/ai_intent_architecture.md Section 7/13) -- produced an
+# unnecessary NEEDS_CLARIFICATION for load_profile.peak_users, even though
+# "stress checkout with 30 users" unambiguously means a peak of 30. That
+# compiler policy is intentional and is NOT changed here (see
+# test_intent_compiler.py::test_stress_missing_peak_users_does_not_fall_back_to_concurrent_users,
+# still passing, still enforcing it). The actual root cause was upstream:
+# the LLM system prompt gave the model no rule for which load_profile field
+# a stress request's single stated figure belongs in. The tests below prove
+# the PIPELINE composes correctly once the interpreter (real or, here,
+# mocked to simulate the corrected prompt's intended output) classifies
+# that figure as peak_users directly -- they cannot prove a real model
+# always follows the prompt (see module docstring); that requires a live
+# call with a real LLM_API_KEY, done separately.
+
+
+def test_system_prompt_instructs_single_stress_figure_as_peak_users():
+    """The actual fix: the prompt LLMIntentInterpreter sends must tell the
+    model that a stress request's single stated user figure is the peak,
+    not the concurrent/steady load -- otherwise the model has no basis to
+    choose one load_profile field over the other."""
+    from app.services.llm_intent_interpreter import _build_system_prompt
+
+    prompt = _build_system_prompt(["/checkout"])
+    assert "peak_users" in prompt
+    assert "concurrent_users" in prompt
+    assert "stress" in prompt.lower()
+
+
+def test_stress_with_single_figure_composes_to_ready_without_clarification():
+    """Simulates the corrected model behavior for "Stress checkout with 30
+    users for 8 seconds": the single stated figure lands directly in
+    peak_users, concurrent_users stays null. Must reach READY -- no
+    unnecessary clarification round trip."""
+    content = """{
+      "status": "COMPLETE",
+      "intent": {
+        "test_type": "stress",
+        "load_profile": {"concurrent_users": null, "peak_users": 30},
+        "duration": "8s",
+        "target_scope": {"endpoints": ["/checkout"]}
+      }
+    }"""
+    interpreter = _interpreter(content, available_endpoints=["/checkout"])
+    result = interpreter.interpret("Stress checkout with 30 users for 8 seconds")
+
+    assert result.status == InterpretationStatus.COMPLETE
+    assert result.intent.load_profile.peak_users == 30
+    assert result.intent.load_profile.concurrent_users is None
+
+    compiled = compile_intent(result.intent)
+    assert compiled.status == IntentStatus.READY
+    assert compiled.clarifications_needed == []
+    assert compiled.test_plan.target_vus == 30
+
+
+def test_stress_with_explicit_threshold_still_composes_to_ready():
+    """Same as above plus "keep p95 below 500ms" -- success_criteria is
+    independent of the load_profile disambiguation fix and must keep
+    working unchanged."""
+    content = """{
+      "status": "COMPLETE",
+      "intent": {
+        "test_type": "stress",
+        "load_profile": {"concurrent_users": null, "peak_users": 30},
+        "duration": "8s",
+        "target_scope": {"endpoints": ["/checkout"]},
+        "success_criteria": {"p95_latency_ms": 500}
+      }
+    }"""
+    interpreter = _interpreter(content, available_endpoints=["/checkout"])
+    result = interpreter.interpret("Stress checkout with 30 users for 8 seconds, keep p95 below 500ms")
+
+    assert result.status == InterpretationStatus.COMPLETE
+    compiled = compile_intent(result.intent)
+    assert compiled.status == IntentStatus.READY
+    assert compiled.test_plan.thresholds.p95_latency_ms == 500
+    assert compiled.test_plan.target_vus == 30
+
+
+def test_stress_with_distinct_start_and_peak_figures_uses_peak_and_ignores_concurrent():
+    """"Start with 10 users and stress up to 100" must NOT trigger the
+    single-figure inference -- both fields are populated distinctly, and
+    the existing compiler behavior (peak_users wins, concurrent_users
+    recorded as ignored) is unchanged."""
+    content = """{
+      "status": "COMPLETE",
+      "intent": {
+        "test_type": "stress",
+        "load_profile": {"concurrent_users": 10, "peak_users": 100},
+        "duration": "20s",
+        "target_scope": {"endpoints": ["/checkout"]}
+      }
+    }"""
+    interpreter = _interpreter(content, available_endpoints=["/checkout"])
+    result = interpreter.interpret("Start with 10 users and stress up to 100 on checkout for 20s")
+
+    assert result.status == InterpretationStatus.COMPLETE
+    assert result.intent.load_profile.concurrent_users == 10
+    assert result.intent.load_profile.peak_users == 100
+
+    compiled = compile_intent(result.intent)
+    assert compiled.status == IntentStatus.READY
+    assert compiled.test_plan.target_vus == 100
+    assert any("concurrent_users was provided but ignored" in a for a in compiled.test_plan.assumptions)
