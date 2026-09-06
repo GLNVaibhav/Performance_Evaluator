@@ -29,7 +29,22 @@ execution timeout are also env-configurable:
 | `K6_EXECUTION_TIMEOUT_S` | `120` | Wall-clock ceiling on the k6 subprocess itself -- a process safety net, distinct from `MAX_DURATION_S` |
 
 Defaults are sized for local/staging/sandbox use on a single developer
-machine, not production load testing.
+machine, not production load testing. Exceeding `MAX_VUS`/`MAX_DURATION_S`
+is always rejected (`422`, never silently capped) -- see
+`docs/performance_engine_interface.md`'s "Workload safety limits" section
+for the advisory "safe alternative" message this now includes, and
+`GET /api/v1/intents/workload-limits` to read the configured envelope.
+
+Payload generation safety (`app/services/k6_engine/payload_generator.py`)
+is also env-configurable -- see `docs/performance_engine_interface.md`'s
+"Payload generation safety bounds" section:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAX_PAYLOAD_DEPTH` | `12` | Recursion ceiling generating one request body |
+| `MAX_PAYLOAD_ARRAY_ITEMS` | `20` | Max items generated for one array field |
+| `MAX_PAYLOAD_BODY_BYTES` | `65536` | Max serialized size of one generated request body |
+| `MAX_REF_RESOLUTION_DEPTH` | `20` | Max `$ref`-chain depth resolved in a fetched OpenAPI document |
 
 `POST /api/v1/intents/interpret` (real LLM, `app/services/llm_intent_interpreter.py`)
 needs `LLM_API_KEY` set to call a real OpenAI-compatible provider -- see

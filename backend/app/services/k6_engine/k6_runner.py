@@ -1,21 +1,32 @@
 """Real k6 subprocess execution. shell=False, argv arrays only (section 13).
 
 Canonical MVP artifact contract (frozen, performance_engine_interface.md):
-  k6 run --summary-trend-stats="min,med,avg,max,p(50),p(95),p(99)"
+  k6 run --summary-trend-stats="min,med,avg,max,p(50),p(75),p(90),p(95),p(99)"
          --summary-export=<artifact_directory>/results.json
          <artifact_directory>/script.js
 
 NDJSON (`--out json=`) is explicitly NOT part of the MVP contract -- not
 requested here, per section 4.
+
+`p(75)`/`p(90)` added Session 5 -- purely additive to an already-computed
+k6 trend metric (k6 does not compute a *new* statistic; it just also
+prints two more percentiles of data it already has), verified empirically
+against the pinned k6 v2.2.0 binary to appear correctly in
+`--summary-export` output alongside the pre-existing percentiles. Never
+invented/estimated in Python -- if a `results.json` predates this change
+(no `p(75)`/`p(90)` key), `metrics_parser.py` leaves those fields absent
+rather than backfilling a guess.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, Optional
 
-_SUMMARY_TREND_STATS = "min,med,avg,max,p(50),p(95),p(99)"
+_SUMMARY_TREND_STATS = "min,med,avg,max,p(50),p(75),p(90),p(95),p(99)"
 
 
 @dataclass
@@ -35,7 +46,18 @@ def run_k6(
     artifact_directory: Path,
     k6_binary: str,
     timeout_s: float,
+    env: Optional[Dict[str, str]] = None,
 ) -> K6RunOutcome:
+    """`env`, if given, is merged ON TOP OF the current process environment
+    for the k6 subprocess only (never written to disk, never part of
+    `cmd`/argv, so it never appears in `script.js`, `results.json`, or
+    either log file). Used by app/services/k6_engine/engine.py to pass
+    app/services/auth_headers.py::build_auth_env()'s (name, value) pair --
+    the k6 script (script_renderer.py) reads it back via k6's own __ENV
+    global at runtime. Omitting `env` (the default) reproduces the exact
+    prior behavior: the subprocess inherits the parent process's
+    environment unchanged, same as passing `env=None` to `subprocess.run`
+    always has."""
     results_path = artifact_directory / "results.json"
     stdout_path = artifact_directory / "stdout.log"
     stderr_path = artifact_directory / "stderr.log"
@@ -50,6 +72,8 @@ def run_k6(
         str(script_path),
     ]
 
+    subprocess_env = {**os.environ, **env} if env else None
+
     started_at = datetime.now(timezone.utc)
     error_message: str | None = None
     stdout, stderr = "", ""
@@ -63,6 +87,7 @@ def run_k6(
             text=True,
             timeout=timeout_s,
             shell=False,
+            env=subprocess_env,
         )
         exit_code = proc.returncode
         stdout, stderr = proc.stdout, proc.stderr

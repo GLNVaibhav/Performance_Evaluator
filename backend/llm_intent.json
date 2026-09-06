@@ -1,0 +1,31 @@
+﻿{
+    "objective":  null,
+    "test_type":  null,
+    "load_profile":  {
+                         "concurrent_users":  25,
+                         "peak_users":  null
+                     },
+    "duration":  "15s",
+    "target_scope":  {
+                         "endpoints":  [
+                                           "/products",
+                                           "/products/{product_id}",
+                                           "/checkout"
+                                       ],
+                         "endpoint_weights":  {
+                                                  "/products":  15.0,
+                                                  "/products/{product_id}":  10.0,
+                                                  "/checkout":  5.0
+                                              }
+                     },
+    "business_flow":  null,
+    "success_criteria":  {
+                             "p95_latency_ms":  1000,
+                             "error_rate":  null
+                         },
+    "schedule":  null,
+    "confidence":  null,
+    "clarifications_needed":  [
+
+                              ]
+}

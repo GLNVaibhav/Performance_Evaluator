@@ -64,6 +64,77 @@ per-endpoint evidence"):
    selected endpoint, so it must not be reported as separate per-endpoint
    evidence (it still contributes to the aggregate metrics as before,
    unchanged).
+
+--- Target authentication (additive amendment) ----------------------------
+
+Every real HTTP request this script makes (GET, POST/PUT/PATCH/DELETE, and
+the auto-generated /cart call inside the checkout dependency) is given a
+chance to carry an authentication header, via a fixed, generic
+`AUTH_HEADERS` object built ONCE at module/init scope:
+
+    const AUTH_HEADER_NAME = __ENV.PERF_EVAL_AUTH_HEADER_NAME || '';
+    const AUTH_HEADER_VALUE = __ENV.PERF_EVAL_AUTH_HEADER_VALUE || '';
+    const AUTH_HEADERS = AUTH_HEADER_NAME ? { [AUTH_HEADER_NAME]: AUTH_HEADER_VALUE } : {};
+
+CRITICAL: the real secret is NEVER interpolated into this generated
+source. It reaches k6 exclusively via k6's own `__ENV` mechanism -- a
+process environment variable set only on the k6 SUBPROCESS
+(app/services/k6_engine/k6_runner.py's `env` parameter, populated by
+app/services/auth_headers.py::build_auth_env()) -- so `script.js` on disk
+contains only the two fixed, non-secret ENV-VAR NAMES, never a value. When
+no auth is configured, both env vars are simply absent/empty and
+`AUTH_HEADERS` evaluates to `{}` -- byte-for-byte the same "no extra
+headers" behavior this renderer had before this amendment. This is one
+generic mechanism for both supported auth types (`bearer`, `api_key_header`)
+-- both resolve to exactly one (header name, header value) pair upstream
+(app/services/auth_headers.py::build_auth_headers()), so the script never
+needs to know which type was configured.
+
+Every request's `headers` object is built via `Object.assign({}, AUTH_HEADERS,
+<whatever headers this request already needed>)` -- the same merge pattern
+`_render_checkout_with_cart_dependency` already used for the checkout body
+(`Object.assign({}, <base>, {cart_id: cartId})`), reused here rather than
+introducing object-spread syntax as a second, redundant merging idiom.
+See docs/target_auth_contract.md for the full design and its documented
+tradeoff (this authenticates real k6 target traffic; it does NOT change
+how the OpenAPI *discovery* fetch is authenticated -- that is a separate,
+Python-side-only concern, app/services/target_validation.py /
+app/services/k6_engine/engine.py's own `build_auth_headers()` call).
+
+--- Payload strategy (Session 3, additive) ---------------------------------
+
+`plan.payload_strategy` (app/schemas/test_plan.py, defaults to `normal`)
+is threaded straight through to every `generate_request_body()` call this
+renderer makes (both `_request_snippet()` and the checkout/cart special
+case) -- selecting between payload_generator.py's two fixed, deterministic
+generation rules. Nothing here decides WHICH values are generated; this
+renderer only ever passes the plan's own choice along, unchanged.
+
+--- HTTP status-code evidence (Session 5, additive) -------------------------
+
+k6's `--summary-export` (the frozen MVP artifact contract) has no built-in
+per-status-code breakdown -- confirmed by inspecting real captured k6
+v2.2.0 output (tests/k6_engine/fixtures/*.json,
+demo-api/tools/k6_*_summary.json) before adding anything. What IS already
+present, unconditionally, with no threshold trick required (unlike the
+per-endpoint tagged submetrics above): `root_group.checks`, keyed by
+whatever name a `check()` call in the script used.
+
+Verified empirically (see docs/performance_engine_interface.md's
+"HTTP status-code evidence" section for the exact probe): a `check()` call
+whose NAME is computed dynamically per response --
+`check(res, { ['http_status_' + res.status]: () => true })` -- makes k6
+aggregate PASS COUNTS per distinct observed status value, e.g.
+`http_status_200: {passes: 950}`, `http_status_404: {passes: 30}`,
+appearing ONLY for statuses actually observed (never a hardcoded list).
+The check condition is always true (`() => true`), so -- like the
+tautological per-endpoint thresholds above -- this can never fail and
+never affects k6's exit code. `res.status === 0` (k6's own convention for
+"no response received", e.g. connection refused) is recorded the same way
+(`http_status_0`) -- real evidence of a failure mode, not a fabricated
+code. `recordHttpStatus()` (defined once, called after every real
+request this script makes, including the checkout/cart special case) is
+the one small, additive collection change this required.
 """
 from __future__ import annotations
 
@@ -71,7 +142,7 @@ import json
 from dataclasses import dataclass
 from typing import List, Optional
 
-from app.schemas.enums import ObjectiveType
+from app.schemas.enums import ObjectiveType, PayloadStrategy
 from app.schemas.test_plan import TargetConfig, TestPlan
 from app.services.k6_engine.endpoint_resolver import ResolvedEndpoint, resolve_selected_endpoints
 from app.services.k6_engine.openapi_loader import NormalizedOpenAPI
@@ -177,29 +248,44 @@ def _js_url_expr(resolved_path: str) -> str:
 
 
 def _params_js(tag_alias: Optional[str], include_headers: bool) -> str:
-    """k6 request-params object literal. Producing the exact same string as
-    before when tag_alias is None keeps every pre-existing rendered-script
-    assertion (tests/k6_engine/test_script_renderer*.py) unchanged."""
-    parts = []
-    if include_headers:
-        parts.append("headers: { 'Content-Type': 'application/json' }")
+    """k6 request-params object literal. `headers` is now ALWAYS present
+    (merging AUTH_HEADERS -- see module docstring's "Target authentication"
+    section -- with whatever headers this request already needed), which
+    is a source-level change from before that amendment (a bare/untagged
+    GET previously received no params object, let alone a headers key) --
+    but AUTH_HEADERS evaluates to `{}` when no auth is configured, so the
+    ACTUAL header set sent by k6 is unchanged for every existing no-auth
+    caller; only the generated source text gained this one constant,
+    always-present `headers: Object.assign({}, AUTH_HEADERS, ...)` clause."""
+    extra_headers = "{ 'Content-Type': 'application/json' }" if include_headers else "{}"
+    parts = [f"headers: Object.assign({{}}, AUTH_HEADERS, {extra_headers})"]
     if tag_alias is not None:
         parts.append(f"tags: {{ endpoint: {json.dumps(tag_alias)} }}")
     return "{ " + ", ".join(parts) + " }"
 
 
-def _request_snippet(resolved: ResolvedEndpoint, var_prefix: str, tag_alias: Optional[str]) -> tuple[str, str]:
-    """Returns (js_statements, response_variable_name)."""
+def _request_snippet(
+    resolved: ResolvedEndpoint,
+    var_prefix: str,
+    tag_alias: Optional[str],
+    strategy: PayloadStrategy = PayloadStrategy.normal,
+) -> tuple[str, str]:
+    """Returns (js_statements, response_variable_name). Every request --
+    GET included, regardless of whether it carries a per-endpoint tag --
+    now always passes a params object, so AUTH_HEADERS reaches every real
+    request k6 makes (see module docstring). `strategy` (Session 3,
+    additive) selects which of payload_generator.py's two deterministic
+    generation rules builds this request's body -- defaulting to `normal`
+    reproduces the exact prior behavior for every existing caller."""
     method = resolved.spec.method
     url_expr = _js_url_expr(resolved.resolved_path)
     res_var = f"res_{var_prefix}"
 
     if method == "get":
-        if tag_alias is None:
-            return f"const {res_var} = http.get({url_expr});", res_var
-        return f"const {res_var} = http.get({url_expr}, {_params_js(tag_alias, include_headers=False)});", res_var
+        params_js = _params_js(tag_alias, include_headers=False)
+        return f"const {res_var} = http.get({url_expr}, {params_js});", res_var
 
-    body = generate_request_body(resolved.spec.request_schema)
+    body = generate_request_body(resolved.spec.request_schema, strategy)
     body_json = json.dumps(body if body is not None else {})
     params_js = _params_js(tag_alias, include_headers=True)
     stmt = f"const {res_var} = http.{method}({url_expr}, JSON.stringify({body_json}), {params_js});"
@@ -207,12 +293,15 @@ def _request_snippet(resolved: ResolvedEndpoint, var_prefix: str, tag_alias: Opt
 
 
 def _render_checkout_with_cart_dependency(
-    spec: NormalizedOpenAPI, checkout: ResolvedEndpoint, checkout_tag_alias: str
+    spec: NormalizedOpenAPI,
+    checkout: ResolvedEndpoint,
+    checkout_tag_alias: str,
+    strategy: PayloadStrategy = PayloadStrategy.normal,
 ) -> str:
     cart_candidates = resolve_selected_endpoints(spec, [_CART_PATH])
     cart_resolved = cart_candidates[0]
-    cart_body = generate_request_body(cart_resolved.spec.request_schema)
-    checkout_body = generate_request_body(checkout.spec.request_schema) or {}
+    cart_body = generate_request_body(cart_resolved.spec.request_schema, strategy)
+    checkout_body = generate_request_body(checkout.spec.request_schema, strategy) or {}
     cart_url_expr = _js_url_expr(cart_resolved.resolved_path)
     checkout_url_expr = _js_url_expr(checkout.resolved_path)
     checkout_params_js = _params_js(checkout_tag_alias, include_headers=True)
@@ -226,8 +315,9 @@ def _render_checkout_with_cart_dependency(
   const cartRes = http.post(
     {cart_url_expr},
     JSON.stringify({json.dumps(cart_body)}),
-    {{ headers: {{ 'Content-Type': 'application/json' }} }}
+    {{ headers: Object.assign({{}}, AUTH_HEADERS, {{ 'Content-Type': 'application/json' }}) }}
   );
+  recordHttpStatus(cartRes);
   let cartId = null;
   try {{ cartId = JSON.parse(cartRes.body).cart_id; }} catch (e) {{ cartId = null; }}
   const checkoutBody = Object.assign({{}}, {json.dumps(checkout_body)}, {{ cart_id: cartId }});
@@ -236,6 +326,7 @@ def _render_checkout_with_cart_dependency(
     JSON.stringify(checkoutBody),
     {checkout_params_js}
   );
+  recordHttpStatus(res_checkout);
   check(res_checkout, {{ 'checkout: got a response': (r) => r.status !== 0 }});
 """
 
@@ -268,11 +359,15 @@ def render_script(plan: TestPlan, target: TargetConfig, spec: NormalizedOpenAPI)
     for i, resolved in enumerate(resolved_endpoints):
         tag_alias = endpoint_tags[i].alias
         if resolved.spec.path == _CHECKOUT_PATH and resolved.spec.method == "post":
-            request_blocks.append(_render_checkout_with_cart_dependency(spec, resolved, tag_alias))
-        else:
-            stmt, res_var = _request_snippet(resolved, str(i), tag_alias)
             request_blocks.append(
-                f"  {stmt}\n  check({res_var}, {{ 'status is not zero (request completed)': (r) => r.status !== 0 }});\n"
+                _render_checkout_with_cart_dependency(spec, resolved, tag_alias, plan.payload_strategy)
+            )
+        else:
+            stmt, res_var = _request_snippet(resolved, str(i), tag_alias, plan.payload_strategy)
+            request_blocks.append(
+                f"  {stmt}\n"
+                f"  recordHttpStatus({res_var});\n"
+                f"  check({res_var}, {{ 'status is not zero (request completed)': (r) => r.status !== 0 }});\n"
             )
 
     if len(request_blocks) == 1:
@@ -303,6 +398,27 @@ export const options = {{
 }};
 
 const BASE_URL = {json.dumps(target.base_url)};
+
+// Target authentication (additive; see module docstring). Only the two
+// FIXED, NON-SECRET env-var NAMES appear in this source -- the real value,
+// if any, exists solely as a k6-subprocess environment variable set by
+// app/services/k6_engine/engine.py via app/services/auth_headers.py::
+// build_auth_env(), never written here. Absent/unset -> AUTH_HEADERS is
+// {{}}, identical to this script's pre-existing no-auth behavior.
+const AUTH_HEADER_NAME = __ENV.PERF_EVAL_AUTH_HEADER_NAME || '';
+const AUTH_HEADER_VALUE = __ENV.PERF_EVAL_AUTH_HEADER_VALUE || '';
+const AUTH_HEADERS = AUTH_HEADER_NAME ? {{ [AUTH_HEADER_NAME]: AUTH_HEADER_VALUE }} : {{}};
+
+// HTTP status-code evidence (additive; see module docstring's "HTTP
+// status-code evidence" section). A dynamically-named, always-true check
+// per distinct observed status -- k6's --summary-export includes
+// root_group.checks unconditionally (no threshold trick needed, unlike
+// the per-endpoint tagged submetrics below), so this is the smallest
+// mechanism that reports EXACTLY the statuses this run actually observed,
+// never a hardcoded/guessed list. Can never fail or affect k6's exit code.
+function recordHttpStatus(res) {{
+  check(res, {{ ['http_status_' + res.status]: () => true }});
+}}
 
 export default function () {{
 {dispatch}

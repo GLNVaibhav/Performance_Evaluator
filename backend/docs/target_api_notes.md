@@ -92,7 +92,28 @@ identity concept. This is not a workaround -- it is the honest current
 capability, documented rather than papered over with an
 unexercisable auth layer.
 
-## 6. Genuine blocker found and documented (Phase 8 format)
+## 6. Genuine blocker found and documented (Phase 8 format) -- RESOLVED (Session 3)
+
+**Status update:** the "minimal proposed change" in item 4 below was
+implemented in Session 3, exactly as scoped here (one new private helper
+--`_deref_tree()` -- plus one call-site change, in `openapi_loader.py`
+only; zero changes to `payload_generator.py`, `script_renderer.py`,
+`engine.py`, or any public function signature). Verified against the
+EXACT nested-model shape that empirically failed below (`items:
+List[CartItemRequest]`) in
+`tests/k6_engine/test_openapi_loader_nested_refs.py::
+test_nested_ref_resolution_enables_real_payload_generation` -- the
+generator now produces `{"items": [{"product_id": 1, "quantity": 1}]}`
+with no changes to `payload_generator.py` at all, confirming the original
+"payload_generator.py already assumes no `$ref` survives to that point"
+premise. Additionally hardened beyond the original proposal: a
+self-referential/cyclic `$ref` (a legitimate recursive-type shape, e.g. a
+tree schema) is detected and left unresolved rather than expanded
+forever, and a `MAX_REF_RESOLUTION_DEPTH` ceiling bounds a very long but
+acyclic chain -- necessary because Session 1 opened OpenAPI *discovery*
+to an arbitrary user-supplied URL, so a schema reaching this resolver is
+no longer necessarily authored by this project's own team. The original
+finding below is left intact as the historical record of the blocker.
 
 **1. Exact file:** `backend/app/services/k6_engine/payload_generator.py`
 (`generate_value`), root-caused to
@@ -152,8 +173,13 @@ private helper plus one call-site change, in one file
 
 ## 7. Deliberately not implemented, and why
 
-- **Nested-model multi-item cart** -- blocked by the finding in §6;
-  reverted to the proven single-item schema.
+- **Nested-model multi-item cart** -- the engine-side blocker in §6 is
+  resolved (Session 3), but the canonical demo API's own `CartRequest`
+  schema (`demo-api/app/models.py`) was NOT changed back to the nested
+  `items: List[CartItemRequest]` form as part of that session -- that is
+  a demo-api product decision independent of the engine capability, out
+  of scope for a payload-generator safety session, and not requested.
+  The single-item schema remains the demo API's real, live contract.
 - **`GET /cart/{cart_id}` (view an existing cart) / `DELETE
   /cart/items/{item_id}`** -- not added. The engine's only cross-request
   data-threading mechanism is the existing hardcoded response-body ->

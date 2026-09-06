@@ -34,6 +34,7 @@ from typing import List, Optional, Tuple
 
 from pydantic import ValidationError
 
+from app.core.config import MAX_DURATION_S, MAX_VUS
 from app.schemas.enums import IntentStatus, ObjectiveType, TestType
 from app.schemas.intent import (
     ClarificationItem,
@@ -41,7 +42,11 @@ from app.schemas.intent import (
     UniversalPerformanceIntent,
 )
 from app.schemas.test_plan import BoundarySearchPlan, FixedLoadPlan, TestPlan, Thresholds
-from app.services.workload_limits import WorkloadLimitExceededError, validate_workload_limits
+from app.services.workload_limits import (
+    WorkloadLimitExceededError,
+    parse_duration_seconds,
+    validate_workload_limits,
+)
 
 # --- Deterministic defaults -------------------------------------------------
 # Applied ONLY when the corresponding field is absent from the intent. Never
@@ -293,6 +298,40 @@ def compile_intent(intent: UniversalPerformanceIntent) -> IntentCompilationRespo
     try:
         validate_workload_limits(plan)
     except WorkloadLimitExceededError as exc:
-        return _invalid(intent, RejectionCode.WORKLOAD_LIMIT_EXCEEDED, str(exc))
+        return _invalid(intent, RejectionCode.WORKLOAD_LIMIT_EXCEEDED, _describe_workload_limit_violation(plan, exc))
 
     return IntentCompilationResponse(status=IntentStatus.READY, intent=intent, test_plan=plan)
+
+
+def _describe_workload_limit_violation(plan: TestPlan, exc: WorkloadLimitExceededError) -> str:
+    """Enriches WorkloadLimitExceededError's message with a concrete,
+    human-actionable "safe alternative" (Session 3) -- e.g. a natural-
+    language request for "50,000 users for 1 hour" is still REJECTED
+    (never silently altered -- see module docstring: this compiler never
+    bypasses validate_workload_limits, and that stays true here), but the
+    rejection now also states what a workload WITHIN the same configured
+    envelope (MAX_VUS / MAX_DURATION_S -- never a separate, weaker or
+    invented limit) would look like, so a caller (human or LLM) can
+    resubmit a corrected intent without guessing. Purely advisory: nothing
+    here constructs or returns a TestPlan -- `status` stays INVALID and
+    `test_plan` stays None, exactly as before this enrichment existed."""
+    safe_vus = min(plan.target_vus, MAX_VUS)
+    if plan.objective_type == ObjectiveType.boundary_search:
+        requested = f"{plan.target_vus} VUs x (ramp {plan.ramp_duration} + hold {plan.hold_duration})"
+        ramp_seconds = parse_duration_seconds(plan.ramp_duration)
+        safe_hold_seconds = max(MAX_DURATION_S - ramp_seconds, 0)
+        safe = f"{safe_vus} VUs x (ramp {plan.ramp_duration} + hold {int(safe_hold_seconds)}s)"
+    else:
+        requested = f"{plan.target_vus} VUs x {plan.duration}"
+        safe_duration_seconds = min(parse_duration_seconds(plan.duration), MAX_DURATION_S)
+        safe = f"{safe_vus} VUs x {int(safe_duration_seconds)}s"
+
+    return (
+        f"{exc}\n"
+        f"Requested: {requested}\n"
+        f"Safe configured maximum: {safe}\n"
+        f"Reason: requested workload exceeds the configured safety envelope "
+        f"(MAX_VUS={MAX_VUS}, MAX_DURATION_S={MAX_DURATION_S}s). This is advisory only -- "
+        "nothing was executed or automatically adjusted; resubmit a new intent with "
+        "values at or below the safe configured maximum shown above."
+    )

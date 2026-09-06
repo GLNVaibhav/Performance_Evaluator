@@ -123,6 +123,24 @@ class UniversalPerformanceIntent(BaseModel):
             return {"steps": v}
         return v
 
+    @field_validator("load_profile", "target_scope", "success_criteria", mode="before")
+    @classmethod
+    def _coerce_explicit_null_to_empty_object(cls, v):
+        """Real provider output has been observed to emit an explicit JSON
+        `null` for one of these sub-objects when it has nothing to report
+        for it (e.g. `"success_criteria": null` for a request that states
+        no threshold), rather than an empty object (`{}`) with every leaf
+        field null. The two are semantically identical -- "nothing
+        specified for this section" -- but these fields use
+        `Field(default_factory=...)`, not `Optional[...]`, so Pydantic only
+        applies the default for a genuinely ABSENT key; an explicit `null`
+        instead raises a validation error and the entire interpretation is
+        discarded as INTERPRETATION_FAILURE over a purely representational
+        difference. Treating an explicit null the same as an empty object
+        is not inventing a value -- every actual leaf field this produces
+        is still None/unset either way, exactly as if the key were absent."""
+        return {} if v is None else v
+
     @field_validator("duration")
     @classmethod
     def _validate_duration_syntax(cls, v: Optional[str]) -> Optional[str]:
