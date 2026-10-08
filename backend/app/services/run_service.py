@@ -77,6 +77,7 @@ def create_run(db: Session, request: RunCreateRequest) -> TestRunRecord:
         plan_id=plan_record.id,
         target_base_url=request.target.base_url,
         artifact_dir=str(artifact_dir),
+        metadata=request.metadata.resolved() if request.metadata is not None else None,
     )
 
     # Artifact dir is keyed by run_id, which only exists after creation.

@@ -135,13 +135,55 @@ never affects k6's exit code. `res.status === 0` (k6's own convention for
 code. `recordHttpStatus()` (defined once, called after every real
 request this script makes, including the checkout/cart special case) is
 the one small, additive collection change this required.
+
+--- Redirect safety (audit remediation) -------------------------------------
+
+k6 follows HTTP redirects by default (verified empirically against the
+pinned k6 v0.57.0 binary: a bare http.get() on a 302 chases the Location
+without any application-level validation), which meant the ACTUAL load
+phase bypassed every redirect validation the application performs elsewhere
+(the probe's manual-redirect contract in src/convex/probe.ts and the
+OpenAPI fetch's follow_redirects=False in openapi_loader.py). An authorized
+target could therefore 302 the real k6 load to a destination the SSRF
+policy (app/services/target_url_safety.py) never approved.
+
+FIX (this renderer only -- no new execution engine, no k6 CLI flags, and
+the existing target-safety policy is unchanged):
+
+1. Every request the script makes is emitted as a call to
+   requestWithRedirectPolicy(method, url, body, params) -- including the
+   auto-generated /cart + /checkout calls. The wrapper injects
+   `redirects: 0` into every request's params, so k6 NEVER auto-follows.
+2. Each 3xx response is re-validated hop by hop before any follow:
+   http/https only; no embedded credentials; cloud-metadata/link-local
+   destinations always blocked; private/loopback destinations blocked iff
+   TARGET_SSRF_POLICY=block_private (same policy classes as
+   target_url_safety.py, embedded at render time); at most MAX_REDIRECTS
+   (3) hops -- identical to probe.ts's hop policy.
+3. A redirect whose host is neither the authorized target host nor a
+   statically validatable IP literal is REFUSED. k6 has no DNS API, so the
+   application's resolve-then-check cannot be replicated in-script; the
+   invariant "an unvalidated redirect destination must never become a k6
+   load target" is therefore enforced fail-closed. This is deliberately
+   STRICTER than, never weaker than, the application policy (documented
+   gap: cross-host redirects to hostnames are never followed).
+4. A refused/over-limit redirect is returned to the caller UNFOLLOWED --
+   the 3xx itself is the measured response (recorded via recordHttpStatus),
+   and an always-true `redirect_not_followed_*` / `redirect_blocked_*`
+   check records WHY, so the run stays honest without ever touching the
+   refused destination.
+
+Regression tests: tests/k6_engine/test_redirect_security.py (render-level
+invariants + REAL k6 executions against controlled local redirect servers).
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from typing import List, Optional
+from urllib.parse import urlparse
 
+from app.core.config import TARGET_SSRF_POLICY
 from app.schemas.enums import ObjectiveType, PayloadStrategy
 from app.schemas.test_plan import TargetConfig, TestPlan
 from app.services.k6_engine.endpoint_resolver import ResolvedEndpoint, resolve_selected_endpoints
@@ -283,12 +325,15 @@ def _request_snippet(
 
     if method == "get":
         params_js = _params_js(tag_alias, include_headers=False)
-        return f"const {res_var} = http.get({url_expr}, {params_js});", res_var
+        return f'const {res_var} = requestWithRedirectPolicy("get", {url_expr}, null, {params_js});', res_var
 
     body = generate_request_body(resolved.spec.request_schema, strategy)
     body_json = json.dumps(body if body is not None else {})
     params_js = _params_js(tag_alias, include_headers=True)
-    stmt = f"const {res_var} = http.{method}({url_expr}, JSON.stringify({body_json}), {params_js});"
+    stmt = (
+        f'const {res_var} = requestWithRedirectPolicy({json.dumps(method)}, {url_expr}, '
+        f"JSON.stringify({body_json}), {params_js});"
+    )
     return stmt, res_var
 
 
@@ -312,7 +357,7 @@ def _render_checkout_with_cart_dependency(
   // /cart call below is intentionally untagged: it is an internal
   // dependency of the /checkout experiment, not itself a selected
   // endpoint, so it is not reported as separate per-endpoint evidence.
-  const cartRes = http.post(
+  const cartRes = requestWithRedirectPolicy("post",
     {cart_url_expr},
     JSON.stringify({json.dumps(cart_body)}),
     {{ headers: Object.assign({{}}, AUTH_HEADERS, {{ 'Content-Type': 'application/json' }}) }}
@@ -321,7 +366,7 @@ def _render_checkout_with_cart_dependency(
   let cartId = null;
   try {{ cartId = JSON.parse(cartRes.body).cart_id; }} catch (e) {{ cartId = null; }}
   const checkoutBody = Object.assign({{}}, {json.dumps(checkout_body)}, {{ cart_id: cartId }});
-  const res_checkout = http.post(
+  const res_checkout = requestWithRedirectPolicy("post",
     {checkout_url_expr},
     JSON.stringify(checkoutBody),
     {checkout_params_js}
@@ -351,9 +396,194 @@ def _weighted_dispatch_js(request_blocks: List[str], cumulative: List[float]) ->
     return "\n".join(lines) + "\n"
 
 
+# --- Redirect safety (audit remediation) ------------------------------------
+# The JS below is embedded verbatim into every rendered script; the two
+# __PLACEHOLDER__ tokens are substituted by _redirect_policy_block() at
+# render time. Deliberately a plain (non-f, raw) string: the body is full of
+# JS braces, regex backslashes and `{{`-free literals that an f-string would
+# mangle. See the module docstring's "Redirect safety" section.
+_REDIRECT_JS_TEMPLATE = r'''
+// --- Redirect safety (see module docstring) ---------------------------------
+// k6 follows HTTP redirects by default; this script NEVER does. Every request
+// is issued through requestWithRedirectPolicy(), which pins `redirects: 0`
+// and re-validates each 3xx hop against the same target-safety policy the
+// application applies before execution (target_url_safety.py / probe.ts):
+//   http/https only, no embedded credentials, cloud-metadata/link-local
+//   destinations always blocked, private/loopback destinations blocked iff
+//   ALLOW_PRIVATE is false (TARGET_SSRF_POLICY=block_private), at most
+//   MAX_REDIRECTS (3) hops -- and a host that is neither the authorized
+//   target host nor a statically validatable IP literal is REFUSED
+//   (k6 has no DNS API -- fail closed, never follow an unvalidated hop).
+// A refused/over-limit redirect is returned UNFOLLOWED: the 3xx itself is
+// the measured response and the refused destination receives zero traffic.
+const MAX_REDIRECTS = 3; // same hop policy as probe.ts::MAX_REDIRECTS
+const ALLOW_PRIVATE = __ALLOW_PRIVATE__;
+const TARGET_HOST = __TARGET_HOST__;
+
+function redirectOrigin(u) {
+  const m = /^([a-zA-Z][a-zA-Z0-9+.\-]*:\/\/)([^\/?#]*)/.exec(u);
+  return m ? m[1] + m[2] : null;
+}
+
+function redirectDirPath(u) {
+  const m = /^[a-zA-Z][a-zA-Z0-9+.\-]*:\/\/[^\/?#]*(\/[^?#]*)?/.exec(u);
+  const path = m && m[1] ? m[1] : "/";
+  return path.slice(0, path.lastIndexOf("/") + 1);
+}
+
+function resolveRedirectUrl(currentUrl, location) {
+  const loc = String(location).trim();
+  if (loc === "") return null;
+  if (/^[a-zA-Z][a-zA-Z0-9+.\-]*:/.test(loc)) return loc; // absolute; scheme re-checked below
+  if (loc.slice(0, 2) === "//") {
+    const m = /^([a-zA-Z][a-zA-Z0-9+.\-]*:)/.exec(currentUrl);
+    return m ? m[1] + loc : null;
+  }
+  const origin = redirectOrigin(currentUrl);
+  if (origin === null) return null;
+  if (loc.charAt(0) === "/") return origin + loc;
+  return origin + redirectDirPath(currentUrl) + loc;
+}
+
+function parseRedirectAuthority(url) {
+  const m = /^[a-zA-Z][a-zA-Z0-9+.\-]*:\/\/([^\/?#]*)/.exec(url);
+  if (!m) return { ok: false, check: "redirect_blocked_unparseable" };
+  const authority = m[1];
+  if (authority.indexOf("@") !== -1) return { ok: false, check: "redirect_blocked_credentials" };
+  let host = authority;
+  if (host.charAt(0) === "[") {
+    const end = host.indexOf("]");
+    if (end === -1) return { ok: false, check: "redirect_blocked_unparseable" };
+    host = host.slice(1, end);
+  } else {
+    const colon = host.lastIndexOf(":");
+    if (colon !== -1) host = host.slice(0, colon);
+  }
+  host = host.toLowerCase().replace(/\.$/, "");
+  if (host === "") return { ok: false, check: "redirect_blocked_unparseable" };
+  return { ok: true, host: host };
+}
+
+function isIpLiteralHost(h) {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.indexOf(":") !== -1;
+}
+
+// Same policy classes as app/services/target_url_safety.py, evaluated
+// statically (k6 has no DNS resolution API): cloud-metadata/link-local
+// unconditionally, private ranges only when TARGET_SSRF_POLICY permits.
+function redirectHostBlockReason(host) {
+  const h = host;
+  if (h === "169.254.169.254" || h === "100.100.100.200" || h === "metadata.google.internal") {
+    return "redirect_blocked_metadata_host";
+  }
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (v4) {
+    const a = Number(v4[1]);
+    const b = Number(v4[2]);
+    const c = Number(v4[3]);
+    const d = Number(v4[4]);
+    if (a > 255 || b > 255 || c > 255 || d > 255) return "redirect_blocked_unparseable";
+    if (a === 169 && b === 254) return "redirect_blocked_metadata_host"; // 169.254.0.0/16
+    if (a === 100 && b === 100 && c === 100 && d === 200) return "redirect_blocked_metadata_host";
+    if (!ALLOW_PRIVATE) {
+      if (a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) {
+        return "redirect_blocked_private_host";
+      }
+    }
+    return null;
+  }
+  if (h.indexOf(":") !== -1) {
+    if (/^fe[89ab]/.test(h)) return "redirect_blocked_metadata_host"; // fe80::/10
+    if (!ALLOW_PRIVATE && (/^f[cd]/.test(h) || h === "::1" || h === "::")) {
+      return "redirect_blocked_private_host";
+    }
+    return null;
+  }
+  if (!ALLOW_PRIVATE && (h === "localhost" || /\.localhost$/.test(h))) {
+    return "redirect_blocked_private_host";
+  }
+  return null;
+}
+
+function checkRedirectDestination(currentUrl, location) {
+  const next = resolveRedirectUrl(currentUrl, location);
+  if (next === null) return { ok: false, check: "redirect_blocked_unparseable" };
+  const schemeMatch = /^([a-zA-Z][a-zA-Z0-9+.\-]*):/.exec(next);
+  const scheme = schemeMatch ? schemeMatch[1].toLowerCase() : "";
+  if (scheme !== "http" && scheme !== "https") {
+    return { ok: false, check: "redirect_blocked_scheme" };
+  }
+  const parsed = parseRedirectAuthority(next);
+  if (!parsed.ok) return parsed;
+  const reason = redirectHostBlockReason(parsed.host);
+  if (reason !== null) return { ok: false, check: reason };
+  if (parsed.host === TARGET_HOST) return { ok: true, url: next }; // authorized target host
+  if (isIpLiteralHost(parsed.host)) return { ok: true, url: next }; // statically validated above
+  return { ok: false, check: "redirect_blocked_unvalidated_host" };
+}
+
+function requestWithRedirectPolicy(method, url, body, params) {
+  let currentUrl = url;
+  let currentMethod = method;
+  let currentBody = body;
+  let hop = 0;
+  while (true) {
+    const p = Object.assign({}, params, { redirects: 0 }); // k6 never auto-follows
+    let res;
+    if (currentMethod === "get" || currentMethod === "head") {
+      res = http[currentMethod](currentUrl, p);
+    } else {
+      res = http[currentMethod](currentUrl, currentBody, p);
+    }
+    if (res.status < 300 || res.status >= 400) return res;
+    const location = res.headers["Location"] || res.headers["location"];
+    if (!location) {
+      check(res, { redirect_not_followed_no_location: () => true });
+      return res;
+    }
+    if (hop >= MAX_REDIRECTS) {
+      check(res, { redirect_not_followed_hop_limit: () => true });
+      return res;
+    }
+    const verdict = checkRedirectDestination(currentUrl, location);
+    if (!verdict.ok) {
+      check(res, { [verdict.check]: () => true });
+      return res;
+    }
+    // This hop is about to be followed: record its status exactly once here;
+    // the chain's FINAL response is recorded by the caller (recordHttpStatus
+    // after the wrapper returns), so every observed status counts once.
+    recordHttpStatus(res);
+    if (res.status === 303 || ((res.status === 301 || res.status === 302) && currentMethod !== "get")) {
+      currentMethod = "get";
+      currentBody = null;
+    }
+    currentUrl = verdict.url;
+    hop += 1;
+  }
+}
+'''
+
+
+def _redirect_policy_block(target: TargetConfig) -> str:
+    """Embed the target-safety policy classes into the script's redirect
+    validator at render time (module docstring, "Redirect safety").
+    TARGET_SSRF_POLICY is read from this module's global so tests can render
+    under a different policy without touching the real environment."""
+    try:
+        host = (urlparse(target.base_url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    allow_private = TARGET_SSRF_POLICY != "block_private"
+    return _REDIRECT_JS_TEMPLATE.replace("__ALLOW_PRIVATE__", "true" if allow_private else "false").replace(
+        "__TARGET_HOST__", json.dumps(host)
+    )
+
+
 def render_script(plan: TestPlan, target: TargetConfig, spec: NormalizedOpenAPI) -> str:
     resolved_endpoints = resolve_selected_endpoints(spec, plan.selected_endpoints)
     endpoint_tags = build_endpoint_tags(plan, spec)
+    redirect_js = _redirect_policy_block(target)
 
     request_blocks: list[str] = []
     for i, resolved in enumerate(resolved_endpoints):
@@ -420,6 +650,7 @@ function recordHttpStatus(res) {{
   check(res, {{ ['http_status_' + res.status]: () => true }});
 }}
 
+{redirect_js}
 export default function () {{
 {dispatch}
   sleep(0.2);

@@ -1,0 +1,50 @@
+# Execution plane image: FastAPI + pinned k6 binary.
+#
+# This is the deployment artifact for the STABLE EXECUTION PLANE option
+# evaluated in Phase 11 (docs/EXECUTION_PLANE_DEPLOYMENT.md): a single container that runs
+# the FastAPI bridge and the real k6 engine, deployable to any
+# HTTPS-capable host (Fly.io, Render, Railway, a VPS behind a named
+# Cloudflare Tunnel, ...). The application architecture is unchanged —
+# Convex still talks HTTPS to this one service; hosting only replaces the
+# ephemeral quick tunnel with a stable URL.
+#
+# Build:  docker build -f Dockerfile.backend -t perforso/execution-plane:latest ./backend
+# Run:    see docker-compose.yml / docs/EXECUTION_PLANE_DEPLOYMENT.md
+
+FROM python:3.10-slim
+
+# Pinned k6 version (immutable identifier — same pin the reproducibility
+# manifest reports; bump deliberately, never silently).
+ARG K6_VERSION=v0.57.0
+ARG TARGETARCH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -sL "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-${TARGETARCH}.tar.gz" \
+       | tar -xz --strip-components=1 -C /usr/local/bin "k6-${K6_VERSION}-linux-${TARGETARCH}/k6" \
+    && k6 version \
+    && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+
+# Per-run artifact directories are created under this mount point; a
+# container/deployment that wants artifacts to survive restarts mounts a
+# volume here (see docs/EXECUTION_PLANE_DEPLOYMENT.md for the persistent
+# disk contract).
+ENV ARTIFACTS_DIR=/data/artifacts
+RUN mkdir -p /data/artifacts
+VOLUME ["/data/artifacts"]
+
+EXPOSE 8000
+
+# uvicorn binds 0.0.0.0 (required by every managed host). EXECUTION_BRIDGE_TOKEN,
+# MAX_VUS, MAX_DURATION_S, K6_EXECUTION_TIMEOUT_S, TARGET_SSRF_POLICY,
+# CORS_ALLOWED_ORIGINS and BACKEND_GIT_COMMIT are read from the environment at
+# runtime — see deploy/env.sample and docs/EXECUTION_PLANE_DEPLOYMENT.md
+# (deployment contract; placeholders only, never real values).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

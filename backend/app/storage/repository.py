@@ -32,13 +32,33 @@ def get_plan(db: Session, plan_id: str) -> Optional[TestPlanRecord]:
     return db.get(TestPlanRecord, plan_id)
 
 
-def create_run(db: Session, plan_id: str, target_base_url: str, artifact_dir: str) -> TestRunRecord:
+_UNKNOWN_METADATA = {
+    "build_id": "UNKNOWN",
+    "git_commit": "UNKNOWN",
+    "application_version": "UNKNOWN",
+    "environment": "UNKNOWN",
+    "deployment_id": "UNKNOWN",
+}
+
+
+def create_run(
+    db: Session,
+    plan_id: str,
+    target_base_url: str,
+    artifact_dir: str,
+    metadata: Optional[dict[str, str]] = None,
+) -> TestRunRecord:
+    """Phase 11: optional build/commit metadata is stored verbatim per run
+    (anything the caller did not supply stays "UNKNOWN" — never inferred).
+    Historical callers that omit `metadata` produce the same rows as
+    before."""
     record = TestRunRecord(
         id=new_id(),
         plan_id=plan_id,
         target_base_url=target_base_url,
         state=RunState.QUEUED.value,
         artifact_dir=artifact_dir,
+        **{**_UNKNOWN_METADATA, **(metadata or {})},
     )
     db.add(record)
     db.commit()

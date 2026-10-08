@@ -81,7 +81,9 @@ def test_bare_get_request_now_carries_a_headers_object():
     """Regression guard for the change from a bare http.get(url) to
     http.get(url, { headers: ... }) -- the single-endpoint, no-tag case."""
     script = render_script(_plan("/products"), _TARGET, _SPEC)
-    assert "http.get(BASE_URL" in script
+    # The GET is now emitted through the redirect-safety wrapper (audit
+    # finding 1) -- it must still carry BASE_URL and the merged headers.
+    assert 'requestWithRedirectPolicy("get", BASE_URL' in script
     assert "Object.assign({}, AUTH_HEADERS" in script
 
 

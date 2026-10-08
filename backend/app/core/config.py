@@ -113,6 +113,13 @@ MAX_PAYLOAD_BODY_BYTES = int(os.environ.get("MAX_PAYLOAD_BODY_BYTES", str(64 * 1
 # than once, regardless of this constant.
 MAX_REF_RESOLUTION_DEPTH = int(os.environ.get("MAX_REF_RESOLUTION_DEPTH", "20"))
 
+# Execution-bridge bearer token (app/api/bridge_auth.py). Optional by
+# environment: unset -> /runs* routes stay open exactly as before (local/dev
+# MVP posture, unchanged); set -> every /api/v1/runs* request must present
+# `Authorization: Bearer $EXECUTION_BRIDGE_TOKEN`. The Freebuff/Convex
+# control plane reads the same value from its own environment.
+EXECUTION_BRIDGE_TOKEN = os.environ.get("EXECUTION_BRIDGE_TOKEN", "")
+
 # Browser-facing CORS allow-list (app/main.py). The frontend
 # (clone/performance-evaluator-frontend) runs on a different origin
 # (Vite's dev server, http://localhost:5173 by default) than this backend
@@ -136,3 +143,7 @@ CORS_ALLOWED_ORIGINS = [
     ).split(",")
     if o.strip()
 ]
+
+# Non-browser bridge clients (Convex actions) do not send Origin preflights;
+# CORS is irrelevant to them, but the Convex deployment origin may be added
+# here via env without touching code when a browser-facing bridge UI exists.

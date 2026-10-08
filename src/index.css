@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 228 32% 5%;
+    --foreground: 220 20% 92%;
+    --card: 228 30% 7%;
+    --card-foreground: 220 20% 92%;
+    --popover: 228 32% 6%;
+    --popover-foreground: 220 20% 92%;
+    --primary: 160 90% 48%;
+    --primary-foreground: 160 90% 6%;
+    --secondary: 225 22% 12%;
+    --secondary-foreground: 220 18% 82%;
+    --muted: 225 20% 12%;
+    --muted-foreground: 222 12% 58%;
+    --accent: 225 22% 12%;
+    --accent-foreground: 220 18% 85%;
+    --destructive: 0 78% 58%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 224 18% 15%;
+    --input: 224 18% 16%;
+    --ring: 160 90% 48%;
+    --radius: 0.65rem;
+    --chart-1: 160 90% 48%;
+    --chart-2: 190 95% 55%;
+    --chart-3: 265 85% 68%;
+    --chart-4: 45 95% 58%;
+    --chart-5: 0 80% 62%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  ::selection {
+    background: hsl(160 90% 48% / 0.25);
+    color: hsl(160 90% 85%);
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(
+      100deg,
+      hsl(160 90% 62%) 0%,
+      hsl(190 95% 60%) 45%,
+      hsl(265 85% 72%) 100%
+    );
+  }
+
+  .glass-panel {
+    background: linear-gradient(180deg, hsl(228 30% 8% / 0.9), hsl(228 30% 6% / 0.85));
+    backdrop-filter: blur(14px);
+  }
+
+  .grid-bg {
+    background-image:
+      linear-gradient(hsl(224 18% 15% / 0.55) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(224 18% 15% / 0.55) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+
+  .glow-ring {
+    box-shadow:
+      0 0 0 1px hsl(160 90% 48% / 0.35),
+      0 0 32px hsl(160 90% 48% / 0.12);
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(224 14% 22%) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(224 14% 22%);
+    border-radius: 999px;
+  }
+}

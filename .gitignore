@@ -26,6 +26,15 @@ demo-api/tools/k6/
 # Node (frontend, later)
 node_modules/
 
+# Generated build outputs (never tracked -- audit finding 4)
+dist/
+isolate/
+*.tsbuildinfo
+tmp_out.txt
+
+# Generated experiment-driver runtime state
+scripts/.experiment-state.json
+
 # Editors / OS
 .vscode/
 .idea/

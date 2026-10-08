@@ -1,0 +1,63 @@
+# Stable execution plane (Phase 11): FastAPI + k6 + the controlled demo API.
+#
+#   docker compose up -d --build
+#     -> demo API      http://127.0.0.1:8080  (the experimental subject)
+#     -> execution API http://127.0.0.1:8000  (FastAPI + real k6 engine)
+#
+# The Convex control plane connects to the execution API over HTTPS at
+# EXECUTION_BRIDGE_URL. For a STABLE public URL, deploy the `execution`
+# service to any HTTPS-capable host (Fly.io / Render / Railway / a VPS) or
+# front it with a NAMED Cloudflare Tunnel (an ephemeral `quick tunnel` is
+# what made earlier URLs expire). The application architecture is
+# unchanged by hosting — see docs/EXECUTION_PLANE_DEPLOYMENT.md.
+#
+# This file deliberately contains NO secret values: copy deploy/env.sample to
+# .env and fill EXECUTION_BRIDGE_TOKEN there (compose reads it via env_file;
+# an absent .env is fine — compose skips a missing env_file with a warning).
+
+services:
+  demo-api:
+    build:
+      context: ./demo-api
+      dockerfile: Dockerfile
+    # Loopback-only by default: the experimental subject is a controlled
+    # fixture, not a public service.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      DB_LATENCY_MS: "150"
+      CHECKOUT_DELAY_MS: "800"
+      ERROR_INJECTION_FAIL_PERCENT: "30"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/products', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  execution:
+    build:
+      context: ./backend
+      dockerfile: ../Dockerfile.backend
+    depends_on:
+      - demo-api
+    ports:
+      - "127.0.0.1:8000:8000"
+    # env_file is OPTIONAL: a missing .env only means bridge auth is unset
+    # (acceptable exclusively for a loopback-only dev deployment).
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Inside the compose network k6 reaches the demo API by service name;
+      # the Convex control plane reaches THIS service via EXECUTION_BRIDGE_URL.
+      TARGET_SSRF_POLICY: allow_private
+      ARTIFACTS_DIR: /data/artifacts
+    volumes:
+      - execution-artifacts:/data/artifacts
+    restart: unless-stopped
+
+volumes:
+  execution-artifacts:

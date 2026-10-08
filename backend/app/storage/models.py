@@ -9,6 +9,9 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_METADATA_DEFAULT = "UNKNOWN"
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -36,6 +39,17 @@ class TestRunRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Phase 11 build/commit metadata (additive, optional, never inferred).
+    # The client may attach immutable version identifiers for the system
+    # under test; anything absent is stored as the literal "UNKNOWN" —
+    # NEVER guessed from hostname/user-agent/environment. Existing rows
+    # predate these columns and simply read back their defaults, so all
+    # historical runs remain valid.
+    build_id: Mapped[str] = mapped_column(String, nullable=False, default=_METADATA_DEFAULT, server_default=_METADATA_DEFAULT)
+    git_commit: Mapped[str] = mapped_column(String, nullable=False, default=_METADATA_DEFAULT, server_default=_METADATA_DEFAULT)
+    application_version: Mapped[str] = mapped_column(String, nullable=False, default=_METADATA_DEFAULT, server_default=_METADATA_DEFAULT)
+    environment: Mapped[str] = mapped_column(String, nullable=False, default=_METADATA_DEFAULT, server_default=_METADATA_DEFAULT)
+    deployment_id: Mapped[str] = mapped_column(String, nullable=False, default=_METADATA_DEFAULT, server_default=_METADATA_DEFAULT)
 
 
 class TestResultRecord(Base):

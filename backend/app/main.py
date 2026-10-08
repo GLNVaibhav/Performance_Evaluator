@@ -7,6 +7,7 @@ from app.api.routes_health import router as health_router
 from app.api.routes_intents import router as intents_router
 from app.api.routes_runs import router as runs_router
 from app.api.routes_targets import router as targets_router
+from app.api.routes_version import router as version_router
 from app.core.config import CORS_ALLOWED_ORIGINS
 from app.storage.db import init_db
 
@@ -38,3 +39,4 @@ app.include_router(health_router, prefix="/api/v1")
 app.include_router(runs_router, prefix="/api/v1")
 app.include_router(intents_router, prefix="/api/v1")
 app.include_router(targets_router, prefix="/api/v1")
+app.include_router(version_router, prefix="/api/v1")

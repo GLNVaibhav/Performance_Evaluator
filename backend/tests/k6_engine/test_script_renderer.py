@@ -61,7 +61,10 @@ def test_fixed_load_script_contains_base_url_and_vu_config():
     assert "http://127.0.0.1:8080" in script
     assert "target: 100" in script
     assert "duration: '20s'" in script
-    assert "http.get" in script
+    # Audit finding 1: requests are no longer emitted as bare http.get(...)
+    # (which k6 would auto-follow redirects on) -- they go through the
+    # redirect-safety wrapper that pins `redirects: 0` and validates every hop.
+    assert 'requestWithRedirectPolicy("get"' in script
     assert "/products" in script
 
 
@@ -90,7 +93,7 @@ def test_post_endpoint_uses_correct_method_and_generated_body():
         duration="10s",
     )
     script = render_script(plan, _TARGET, _SPEC)
-    assert "http.post" in script
+    assert 'requestWithRedirectPolicy("post"' in script  # redirect-safe wrapper, audit finding 1
     assert '"product_id": 1' in script
 
 

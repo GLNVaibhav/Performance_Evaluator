@@ -35,7 +35,21 @@ def _add_missing_columns() -> None:
                 if column.name in existing_columns:
                     continue
                 ddl_type = column.type.compile(dialect=engine.dialect)
-                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {ddl_type}'))
+                # Phase 11: include a column-level DEFAULT when the model
+                # declares one (server_default). SQLite REFUSES
+                # `ADD COLUMN ... NOT NULL` without a default on a table
+                # that already has rows — the exact situation a migration
+                # runs in. Columns like TestRunRecord.build_id (NOT NULL,
+                # default 'UNKNOWN') therefore must carry their default
+                # into the ALTER; nullable columns (all prior additions)
+                # are unaffected (no server_default → no clause, identical
+                # DDL to before).
+                default_clause = ""
+                sd = column.server_default
+                if sd is not None and getattr(sd, "is_scalar", False):
+                    literal = str(sd.arg).replace("'", "''")
+                    default_clause = f" DEFAULT '{literal}'"
+                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {ddl_type}{default_clause}'))
 
 
 def init_db() -> None:

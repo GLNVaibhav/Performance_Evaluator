@@ -1,0 +1,135 @@
+{
+  "schema_version": "perforso.eval-suite.v1",
+  "scope": "controlled demo API only (http://127.0.0.1:8080) — never a public website",
+  "plan_defaults": {
+    "objectiveType": "fixed_load",
+    "testType": "baseline",
+    "targetVus": 5,
+    "duration": "8s",
+    "selectedEndpoints": ["/products"],
+    "thresholds": { "p95LatencyMs": 2000, "errorRate": 0.5 },
+    "assumptions": ["phase 11 controlled evaluation suite"]
+  },
+  "scenarios": {
+    "A_normal": {
+      "demo_mode": "normal",
+      "test_plan": "plan_defaults",
+      "expected_behavior": "no artificial latency or injected failures",
+      "observable": {
+        "run_completes": true,
+        "error_rate_pp_max": 1.0,
+        "status_codes_exclusive": ["200"],
+        "threshold_status": "PASS",
+        "latency_p95_ms_range": [0, 500]
+      },
+      "evidence_to_validate": [
+        "run.thresholdStatus === PASS",
+        "externalResult.metrics.status_codes contains only observed 200s",
+        "externalResult.metrics.error_rate <= 0.01"
+      ]
+    },
+    "B_db_latency": {
+      "demo_mode": "db_latency",
+      "test_plan": "plan_defaults",
+      "expected_behavior": "~150ms (DB_LATENCY_MS, default 150) added to GET /products",
+      "observable": {
+        "run_completes": true,
+        "error_rate_pp_max": 1.0,
+        "status_codes_exclusive": ["200"],
+        "threshold_status": "PASS",
+        "latency_p95_ms_range": [100, 500]
+      },
+      "evidence_to_validate": [
+        "run.thresholdStatus === PASS",
+        "externalResult.metrics.per_endpoint[0].p95_ms >= 100 (injection is ~150ms; tolerance for scheduler noise)",
+        "externalResult.metrics.status_codes contains only observed 200s"
+      ]
+    },
+    "C_checkout_bottleneck": {
+      "demo_mode": "checkout_bottleneck",
+      "test_plan": "plan_defaults",
+      "expected_behavior": "~800ms delay on POST /checkout ONLY — GET /products is unaffected",
+      "observable": {
+        "run_completes": true,
+        "error_rate_pp_max": 1.0,
+        "status_codes_exclusive": ["200"],
+        "threshold_status": "PASS",
+        "latency_p95_ms_range": [0, 500]
+      },
+      "evidence_to_validate": [
+        "run.thresholdStatus === PASS (products reads stay fast — localization, not blanket latency)",
+        "externalResult.metrics.status_codes contains only observed 200s"
+      ],
+      "note": "Validates MODE SCOPING with a /products plan: checkout_bottleneck must not slow unrelated endpoints. The bottleneck itself is exercised by demo-api/tests and the endpoint selection in k6_scripts with /checkout."
+    },
+    "D_error_injection": {
+      "demo_mode": "error_injection",
+      "test_plan": "plan_defaults",
+      "expected_behavior": "~30% of requests return HTTP 503 (ERROR_INJECTION_FAIL_PERCENT, deterministic hash buckets)",
+      "observable": {
+        "run_completes": true,
+        "error_rate_pp_min": 10.0,
+        "status_codes_subset": ["200", "503"],
+        "threshold_status": "FAIL"
+      },
+      "evidence_to_validate": [
+        "run.thresholdStatus === FAIL",
+        "externalResult.metrics.status_codes includes 503",
+        "externalResult.metrics.error_rate >= 0.10 (loose lower bound; configured ~30%)"
+      ]
+    }
+  },
+  "regression_matrix": [
+    {
+      "id": "healthy_to_healthy",
+      "baseline_mode": "normal",
+      "candidate_mode": "normal",
+      "expectation": {
+        "compatibility": "COMPATIBLE",
+        "classification": "NO_REGRESSION_DETECTED",
+        "rationale": "identical controlled conditions; nothing changed"
+      }
+    },
+    {
+      "id": "healthy_to_latency_injection",
+      "baseline_mode": "normal",
+      "candidate_mode": "db_latency",
+      "expectation": {
+        "compatibility": "COMPATIBLE",
+        "classification": "MULTIPLE_REGRESSIONS",
+        "rationale": "closed fixed-VU workload: +~150ms/request latency breaches AND throughput (rps) necessarily falls — the engine must report exactly what the evidence supports, not the single intended dimension"
+      },
+      "guarded_achievable": {
+        "classification": "LATENCY_REGRESSION",
+        "condition": "if candidate rps degradation stays within 10% (e.g. large VU counts absorbing latency); NOT achievable with the 5 VU/8s plan_defaults workload"
+      }
+    },
+    {
+      "id": "healthy_to_checkout_bottleneck",
+      "baseline_mode": "normal",
+      "candidate_mode": "checkout_bottleneck",
+      "plan_overrides": { "selectedEndpoints": ["/products"] },
+      "expectation": {
+        "compatibility": "COMPATIBLE",
+        "classification": "NO_REGRESSION_DETECTED",
+        "rationale": "checkout_bottleneck delays POST /checkout only; a /products-only plan must show no regression (mode scoping, measured)"
+      }
+    },
+    {
+      "id": "healthy_to_error_injection",
+      "baseline_mode": "normal",
+      "candidate_mode": "error_injection",
+      "expectation": {
+        "compatibility": "COMPATIBLE",
+        "classification": "ERROR_RATE_REGRESSION",
+        "rationale": "~30% injected 503s breach the +1pp error-rate policy; latency/rps must NOT be claimed as breaches when the stored evidence does not support them beyond policy"
+      }
+    }
+  ],
+  "guardrails": [
+    "never claim exact latency values unless the experiment guarantees them — use ranges/tolerances",
+    "the regression engine classifies from stored evidence + policy only; expectations state what the EVIDENCE will support, not desired labels",
+    "demo mode is reset to normal after every scenario/case",
+    "expected classification for healthy_to_latency_injection is guarded: closed-model rps consequence is part of the honest result"
+  ]
+}

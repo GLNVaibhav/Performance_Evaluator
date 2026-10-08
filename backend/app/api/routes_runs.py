@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
+from app.api.bridge_auth import require_bridge_auth
 from app.schemas.enums import RunState
 from app.schemas.run import RunCreateRequest, RunCreateResponse, RunStatusResponse
 from app.schemas.test_result import (
@@ -23,8 +24,17 @@ from app.services.target_url_safety import TargetURLSafetyError
 from app.services.target_validation import TargetValidationError
 from app.services.workload_limits import WorkloadLimitExceededError
 from app.storage import repository
+from app.experiment_manifest import build_experiment_manifest
 
-router = APIRouter(prefix="/runs", tags=["runs"])
+router = APIRouter(
+    prefix="/runs",
+    tags=["runs"],
+    # Execution-bridge auth (see app/api/bridge_auth.py): enforced on every
+    # /runs* route when EXECUTION_BRIDGE_TOKEN is configured; a no-op when it
+    # is not (local/dev MVP posture). Runs are the only routes that cost real
+    # k6 subprocess executions or reveal results.
+    dependencies=[Depends(require_bridge_auth)],
+)
 
 
 class AIAnalysisResponse(BaseModel):
@@ -159,6 +169,33 @@ def get_run_result(run_id: str, db: Session = Depends(get_db)) -> TestResult:
             ),
         }
     )
+
+
+@router.get("/{run_id}/manifest", response_model=None)
+def get_run_manifest(run_id: str, db: Session = Depends(get_db)) -> dict:
+    """Machine-readable experiment manifest (Phase 11): what EXACTLY was
+    executed — plan verbatim, target, thresholds, weights, build/commit
+    metadata, bridge identifiers, and an immutable reference to the stored
+    result (never a duplicate). Read-only; assembled from already-persisted
+    records."""
+    run_record = repository.get_run(db, run_id)
+    if run_record is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    plan_record = repository.get_plan(db, run_record.plan_id)
+    if plan_record is None:
+        raise HTTPException(status_code=500, detail="run has no persisted plan")
+    result_record = repository.get_result(db, run_id)
+    result = repository.result_record_to_schema(result_record) if result_record is not None else None
+    # correlation_id / submitted_by are not persisted as columns; the
+    # correlation id is recovered from the plan's assumptions marker by the
+    # manifest builder (see app/experiment_manifest.py).
+    return build_experiment_manifest(
+        run_record,
+        plan_record,
+        result,
+        correlation_id=None,
+        submitted_by=None,
+    ).model_dump(mode="json")
 
 
 @router.post("/{run_id}/analyze", response_model=AIAnalysisResponse)
